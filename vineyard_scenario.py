@@ -1,6 +1,7 @@
 # vineyard_scenario.py
 
 import torch
+import numpy as np
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.core import World, Agent, Landmark, Sphere
 from vmas.simulator.utils import Color
@@ -23,10 +24,37 @@ class VineyardScenario(BaseScenario):
     def make_world(self, batch_dim, device, **kwargs):
         """Create the vineyard world."""
         
+        # === LOAD REAL DATA OR USE DEFAULT ===
+        excel_file = kwargs.get("excel_file", None)
+        
+        if excel_file is not None:
+            # Load real vine positions from Excel
+            import pandas as pd
+            df = pd.read_excel(excel_file)
+            vine_positions_raw = df[["Position X", "Position Y"]].values
+            
+            # Subsample if requested
+            n_vines_requested = kwargs.get("n_vines", 100)
+            if n_vines_requested < len(vine_positions_raw):
+                indices = np.linspace(0, len(vine_positions_raw) - 1, n_vines_requested, dtype=int)
+                vine_positions_raw = vine_positions_raw[indices]
+            
+            # Normalize to [0, 1] then scale to [-0.9, 0.9]
+            vine_positions_raw = vine_positions_raw - vine_positions_raw.min(axis=0)
+            max_dim = vine_positions_raw.max()
+            self.vine_positions_np = (vine_positions_raw / max_dim) * 1.8 - 0.9
+            self.n_vines = len(self.vine_positions_np)
+            self.use_real_positions = True
+            print(f"Loaded {self.n_vines} vines from {excel_file}")
+        else:
+            # Use default generated positions
+            self.n_vines = kwargs.get("n_vines", 2)
+            self.vine_positions_np = None
+            self.use_real_positions = False
+        
         # === PARAMETERS ===
         self.n_humans = kwargs.get("n_humans", 1)
         self.n_drones = kwargs.get("n_drones", 1)
-        self.n_vines = kwargs.get("n_vines", 2)
         self.grapes_per_vine = kwargs.get("grapes_per_vine", 3)
         self.harvest_time = kwargs.get("harvest_time", 10)
         self.human_speed = kwargs.get("human_speed", 0.03)
@@ -34,6 +62,7 @@ class VineyardScenario(BaseScenario):
         self.fatigue_rate = kwargs.get("fatigue_rate", 0.005)
         self.fatigue_speed_penalty = kwargs.get("fatigue_speed_penalty", 0.5)
         self.interact_dist = kwargs.get("interact_dist", 0.1)
+        self.collection_point_pos = kwargs.get("collection_point", [0.95, 0.0])
         
         self.batch_dim = batch_dim
         self.device = device
@@ -46,7 +75,7 @@ class VineyardScenario(BaseScenario):
         for i in range(self.n_humans):
             agent = Agent(
                 name=f"human_{i}",
-                shape=Sphere(radius=0.06),
+                shape=Sphere(radius=0.04),
                 color=Color.BLUE,
             )
             world.add_agent(agent)
@@ -55,17 +84,18 @@ class VineyardScenario(BaseScenario):
         for i in range(self.n_drones):
             agent = Agent(
                 name=f"drone_{i}",
-                shape=Sphere(radius=0.04),
+                shape=Sphere(radius=0.03),
                 color=Color.GREEN,
             )
             world.add_agent(agent)
         
-        # Vines (red)
+        # Vines (red) - smaller if many vines
+        vine_radius = 0.08 if self.n_vines <= 10 else 0.02
         self.vines = []
         for i in range(self.n_vines):
             vine = Landmark(
                 name=f"vine_{i}",
-                shape=Sphere(radius=0.08),
+                shape=Sphere(radius=vine_radius),
                 color=Color.RED,
                 collide=False,
             )
@@ -75,7 +105,7 @@ class VineyardScenario(BaseScenario):
         # Collection point (yellow)
         self.collection_point = Landmark(
             name="collection_point",
-            shape=Sphere(radius=0.1),
+            shape=Sphere(radius=0.08),
             color=Color.YELLOW,
             collide=False,
         )
@@ -112,35 +142,51 @@ class VineyardScenario(BaseScenario):
     def reset_world_at(self, env_index):
         """Reset positions and state."""
         
-        # Collection point (bottom-left)
-        self.collection_point.set_pos(
-            torch.tensor([-0.8, -0.8], device=self.device),
-            batch_index=env_index,
-        )
+        # === SET VINE POSITIONS ===
+        if self.use_real_positions:
+            # Use real positions from Excel
+            for i, vine in enumerate(self.vines):
+                pos = torch.tensor(self.vine_positions_np[i], dtype=torch.float32, device=self.device)
+                vine.set_pos(pos, batch_index=env_index)
+        else:
+            # Generate positions (original behavior)
+            for i, vine in enumerate(self.vines):
+                x = -0.5 + i * (1.0 / max(1, self.n_vines - 1)) if self.n_vines > 1 else 0.0
+                vine.set_pos(
+                    torch.tensor([x, 0.5], device=self.device),
+                    batch_index=env_index,
+                )
         
-        # Vines (top area, spread out)
-        for i, vine in enumerate(self.vines):
-            x = -0.5 + i * (1.0 / max(1, self.n_vines - 1)) if self.n_vines > 1 else 0.0
-            vine.set_pos(
-                torch.tensor([x, 0.5], device=self.device),
+        # === SET COLLECTION POINT ===
+        if self.use_real_positions:
+            # Collection point on the right side
+            self.collection_point.set_pos(
+                torch.tensor(self.collection_point_pos, dtype=torch.float32, device=self.device),
+                batch_index=env_index,
+            )
+        else:
+            # Original position (bottom-left)
+            self.collection_point.set_pos(
+                torch.tensor([-0.8, -0.8], device=self.device),
                 batch_index=env_index,
             )
         
-        # Humans (near collection point)
+        # === POSITION AGENTS NEAR COLLECTION POINT ===
+        cp = self.collection_point_pos if self.use_real_positions else [-0.8, -0.8]
+        
         for i in range(self.n_humans):
             self.world.agents[i].set_pos(
-                torch.tensor([-0.6 + i * 0.2, -0.6], device=self.device),
+                torch.tensor([cp[0] - 0.1, cp[1] - 0.1 + i * 0.05], dtype=torch.float32, device=self.device),
                 batch_index=env_index,
             )
         
-        # Drones (near collection point)
         for i in range(self.n_drones):
             self.world.agents[self.n_humans + i].set_pos(
-                torch.tensor([-0.4 + i * 0.2, -0.8], device=self.device),
+                torch.tensor([cp[0] - 0.05, cp[1] + 0.1 + i * 0.05], dtype=torch.float32, device=self.device),
                 batch_index=env_index,
             )
         
-        # Reset state
+        # === RESET STATE ===
         if env_index is None:
             self.vine_grapes[:] = self.grapes_per_vine
             self.boxes_waiting[:] = 0
@@ -159,6 +205,11 @@ class VineyardScenario(BaseScenario):
             self.agent_target_vine[env_index] = 0
             self.fatigue[env_index] = 0.0
             self.deliveries_this_step[env_index] = 0.0
+    
+    
+    # === REST OF THE FILE STAYS THE SAME ===
+    # (observation, reward, done, process_action, process_step, etc.)
+    # ... copy everything from line 164 onwards from your original file
     
     
     def observation(self, agent):
