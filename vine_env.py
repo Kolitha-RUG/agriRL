@@ -2,6 +2,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from gymnasium.envs.registration import register
+import matplotlib.pyplot as plt
 
 # Register once (ensure the module path matches your filename)
 register(
@@ -67,7 +68,7 @@ class Drone:
 
 
 class VineEnv(gym.Env):
-    metadata = {"render_modes": ["terminal"], "render_fps": 1}
+    metadata = {"render_modes": ["terminal","human"], "render_fps": 1}
 
     def __init__(
         self,
@@ -77,7 +78,7 @@ class VineEnv(gym.Env):
         num_drones=1,
         max_boxes_per_vine=10,
         max_backlog=10,
-        field_size=(10.0, 10.0),
+        field_size=(100.0, 100.0),
         max_steps=200,
         # time model
         dt=1.0,                 # seconds per env step
@@ -334,6 +335,54 @@ class VineEnv(gym.Env):
             print(f"  Drone {i}: status={d.status} busy={d.busy} t={d.time_left:.1f} has_box={d.has_box} pos={d.position}")
         print("====================================================")
 
+        if self.render_mode != "human":
+            return
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.set_title(f"Step {self.steps}, Delivered {self.delivered}")
+        ax.set_xlim(0, self.field_size[0])
+        ax.set_ylim(0, self.field_size[1])
+
+        # draw collection point
+        cp = self.collection_point
+        ax.scatter(cp[0], cp[1], c="gold", marker="*", s=200, label="Collection Point")
+
+        # draw vines
+        for i, v in enumerate(self.vines):
+            ax.scatter(v.position[0], v.position[1], c="green", marker="s", s=100)
+            ax.text(
+                v.position[0],
+                v.position[1] + 0.3,
+                f"R:{v.boxes_remaining}\nQ:{v.queued_boxes}",
+                fontsize=8,
+                ha="center",
+            )
+
+        # draw humans
+        for i, h in enumerate(self.humans):
+            ax.scatter(h.position[0], h.position[1], c="blue", marker="o", s=100)
+            ax.text(
+                h.position[0],
+                h.position[1] - 0.3,
+                f"H{i}",
+                fontsize=8,
+                ha="center",
+            )
+
+        # draw drones
+        for i, d in enumerate(self.drones):
+            ax.scatter(d.position[0], d.position[1], c="red", marker="^", s=100)
+            ax.text(
+                d.position[0],
+                d.position[1] - 0.3,
+                f"D{i}",
+                fontsize=8,
+                ha="center",
+            )
+
+        ax.legend(loc="upper right")
+        plt.show()       
+
 def my_check_env():
     from gymnasium.utils.env_checker import check_env
     env = gym.make('VineEnv-v0')
@@ -343,6 +392,17 @@ def my_check_env():
 
 if __name__ == "__main__":
     # my_check_env()
-    env = gym.make('VineEnv-v0', render_mode="terminal")
+    # env = gym.make('VineEnv-v0', render_mode="human")
+    # obs, info = env.reset()
+    # done = False
+    plt.ion()
+
+    env = gym.make("VineEnv-v0", render_mode="human")
     obs, info = env.reset()
+
     done = False
+    while not done:
+        action = env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(action)
+        env.render()
+        done = terminated or truncated
