@@ -28,7 +28,7 @@ pygame.display.set_caption("Vine Environment Visualization")
 clock = pygame.time.Clock()
 
 # ---- Load environment ----
-env = gym.make("VineEnv-v0", render_mode=None)
+env = gym.make("VineEnv-v0", render_mode=None, topology_mode="row")
 base_env = env.unwrapped  # unwrap so we can inspect internals
 obs, info = base_env.reset()
 

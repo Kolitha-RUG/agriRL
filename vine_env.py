@@ -3,6 +3,7 @@ import gymnasium as gym
 from gymnasium import spaces
 from gymnasium.envs.registration import register
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # Register once (ensure the module path matches your filename)
 register(
@@ -19,6 +20,35 @@ ACTION_ENQUEUE   = 2
 DRONE_IDLE       = 0
 DRONE_GO_TO_VINE = 1
 DRONE_DELIVER    = 2
+
+def compute_num_vines(topology_mode):
+    df = pd.read_excel("data/Vinha_Maria_Teresa_RL.xlsx")
+
+    if topology_mode == "full":
+        return len(df)
+
+    elif topology_mode == "row":
+        return df["lot"].nunique()
+
+    else:
+        raise ValueError("Unknown topology mode")
+        
+def field_size(topology_mode):
+    df = pd.read_excel("data/Vinha_Maria_Teresa_RL.xlsx")
+    df["x"] = df["x"] / 1000.0
+    df["y"] = df["y"] / 1000.0
+    if topology_mode == "full":
+        xs = df["x"].values
+        ys = df["y"].values
+        return (xs.max(), ys.max())
+    elif topology_mode == "row":
+        grouped = df.groupby("lot")
+        xs = grouped["x"].mean()
+        ys = grouped["y"].mean()
+        return xs.max(), ys.max()
+
+    else:
+        raise ValueError("Unknown topology mode")
 
 
 def one_hot(idx: int, size: int) -> np.ndarray:
@@ -67,34 +97,41 @@ class Drone:
         self.target_vine = None  # int index or None
 
 
+
 class VineEnv(gym.Env):
-    metadata = {"render_modes": ["terminal","human"], "render_fps": 1}
+    metadata = {"render_modes": ["terminal","human"], "render_fps": 100}
 
     def __init__(
         self,
         render_mode="terminal",
-        num_vines=5,
+        topology_mode="row", # "full" or "row"
+
         num_humans=2,
         num_drones=1,
         max_boxes_per_vine=10,
         max_backlog=10,
-        field_size=(100.0, 100.0),
         max_steps=200,
         # time model
         dt=1.0,                 # seconds per env step
         harvest_time=8.0,        # seconds to fill/produce 1 box
         human_speed=1.0,         # units/sec (for transport)
         drone_speed=2.0,         # units/sec
+        vineyard_file = "data/Vinha_Maria_Teresa_RL.xlsx",
     ):
         super().__init__()
         self.render_mode = render_mode 
-        self.num_vines = num_vines
+        self.num_vines = compute_num_vines(topology_mode)
         self.num_humans = num_humans
         self.num_drones = num_drones
         self.max_boxes_per_vine = max_boxes_per_vine
         self.max_backlog = max_backlog
-        self.field_size = np.array(field_size, dtype=np.float32)
+        self.field_size = np.array([1.0, 1.0], dtype=np.float32)
         self.max_steps = max_steps
+        self.topology_mode = topology_mode
+        self.vineyard_file = vineyard_file
+        self._pygame_initialized = False
+        self._screen = None
+        self._clock = None
 
         self.dt = float(dt)
         self.harvest_time = float(harvest_time)
@@ -139,28 +176,92 @@ class VineEnv(gym.Env):
         self.steps = 0
         self.delivered = 0
 
+
+    def load_vineyard(self, file_path):
+        df = pd.read_excel(file_path)
+        # convert to meters
+        df["x"] = df["x"] / 1000.0
+        df["y"] = df["y"] / 1000.0
+        df["z"] = df["z"] / 1000.0
+
+        # normalize origin
+        df["x"] -= df["x"].min()
+        df["y"] -= df["y"].min()
+
+        return df
+
+    def build_full_vines(self, df):
+        vines = []
+        for _, r in df.iterrows():
+            v = Vine(position=(r.x, r.y), max_boxes=self.max_boxes_per_vine)
+            v.line = r.line
+            v.lot = r.lot
+            v.z = r.z
+            vines.append(v)
+        return vines
+
+    def build_row_vines(self, df):
+        vines = []
+        grouped = df.groupby("lot")
+
+        for lot_id, g in grouped:
+            x_mean = g["x"].mean()
+            y_mean = g["y"].mean()
+            z_mean = g["z"].mean()
+
+            # total boxes proportional to number of vines
+            total_boxes = len(g) * self.max_boxes_per_vine
+
+            v = Vine(position=(x_mean, y_mean), max_boxes=total_boxes)
+            v.lot = lot_id
+            v.lot = g["lot"].iloc[0]
+            v.z = z_mean
+            v.n_vines = len(g)  # keep this for reward scaling
+
+            vines.append(v)
+
+        return vines
+
     def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed)
-        self.steps = 0
-        self.delivered = 0
+            super().reset(seed=seed)
 
-        # Example: random vine positions
-        vine_positions = self.np_random.random((self.num_vines, 2), dtype=np.float32) * self.field_size
+            df = self.load_vineyard(self.vineyard_file)
 
-        self.vines = [Vine(vine_positions[i], self.max_boxes_per_vine) for i in range(self.num_vines)]
+            if self.topology_mode == "full":
+                self.vines = self.build_full_vines(df)
+            elif self.topology_mode == "row":
+                self.vines = self.build_row_vines(df)
+            else:
+                raise ValueError("Unknown topology_mode")
 
-        # Humans start at their assigned vine position (simple first version)
-        self.humans = []
-        for h in range(self.num_humans):
-            assigned = h % self.num_vines
-            pos = self.vines[assigned].position.copy()
-            self.humans.append(Human(pos, assigned))
+            # update field size dynamically
+            xs = np.array([v.position[0] for v in self.vines])
+            ys = np.array([v.position[1] for v in self.vines])
 
-        # Drones start at collection point
-        self.drones = [Drone(self.collection_point.copy()) for _ in range(self.num_drones)]
+            self.x_min = xs.min()
+            self.y_min = ys.min()
 
-        return self._get_obs(), {}
+            self.field_size = np.array(
+                [xs.max() - self.x_min, ys.max() - self.y_min],
+                dtype=np.float32)
 
+            self.steps = 0
+            self.delivered = 0
+
+            # Humans start at their assigned vine position (simple first version)
+            self.humans = []
+            for h in range(self.num_humans):
+                assigned = h % self.num_vines
+                pos = self.vines[assigned].position.copy()
+                self.humans.append(Human(pos, assigned))
+
+            # Drones start at collection point
+            self.drones = [Drone(self.collection_point.copy()) for _ in range(self.num_drones)]
+            self.collection_point = np.array([np.mean(xs), np.mean(ys)],
+                                        dtype=np.float32)
+
+            return self._get_obs(), {}
+    
     def step(self, actions):
         self.steps += 1
         actions = np.asarray(actions, dtype=np.int64)
@@ -286,102 +387,150 @@ class VineEnv(gym.Env):
             "delivered": self.delivered,
             "backlog_total": backlog_total,
         }
+
+
         return self._get_obs(), reward, terminated, truncated, info
 
     def _get_obs(self) -> np.ndarray:
         obs = []
 
-        # vines: pos + remaining + queued
+        # --- helper: normalize a 2D position into [0,1] ---
+        def norm_pos(pos):
+            return np.array(
+                [
+                    (pos[0] - self.x_min) / max(self.field_size[0], 1e-6),
+                    (pos[1] - self.y_min) / max(self.field_size[1], 1e-6),
+                ],
+                dtype=np.float32,
+            )
+
+        # =====================
+        # VINES
+        # =====================
         for v in self.vines:
-            obs.extend((v.position / self.field_size).tolist())  # (x,y) -> [0,1]
-        obs.extend((self.collection_point / self.field_size).tolist())
+            obs.extend(norm_pos(v.position))
+
+        # collection point
+        obs.extend(norm_pos(self.collection_point))
 
         for v in self.vines:
             obs.append(v.boxes_remaining / max(self.max_boxes_per_vine, 1))
+
         for v in self.vines:
             obs.append(v.queued_boxes / max(self.max_backlog, 1))
 
-        # humans
+        # =====================
+        # HUMANS
+        # =====================
         for h in self.humans:
-            obs.extend((h.position / self.field_size).tolist())
+            obs.extend(norm_pos(h.position))
+
         for h in self.humans:
             obs.append(h.fatigue)
+
         for h in self.humans:
-            obs.extend(one_hot(h.current_action, self.num_actions).tolist())
+            obs.extend(one_hot(h.current_action, self.num_actions))
+
         for h in self.humans:
             obs.append(1.0 if h.has_box else 0.0)
-        for h in self.humans:
-            obs.extend(one_hot(h.assigned_vine, self.num_vines).tolist())
 
-        # drones
+        for h in self.humans:
+            obs.extend(one_hot(h.assigned_vine, self.num_vines))
+
+        # =====================
+        # DRONES
+        # =====================
         for d in self.drones:
-            obs.extend((d.position / self.field_size).tolist())
+            obs.extend(norm_pos(d.position))
+
         for d in self.drones:
-            obs.extend(one_hot(d.status, self.num_drone_status).tolist())
+            obs.extend(one_hot(d.status, self.num_drone_status))
+
         for d in self.drones:
             obs.append(1.0 if d.has_box else 0.0)
 
-        return np.asarray(obs, dtype=np.float32)
+        obs = np.asarray(obs, dtype=np.float32)
+
+        # --- optional safety check (recommended while debugging) ---
+        # assert np.all(obs >= -1e-6) and np.all(obs <= 1.0 + 1e-6), "Obs out of bounds!"
+
+        return obs
+
+
+    def _render_pygame(self):
+        import pygame
+
+        SCREEN_W, SCREEN_H = 800, 800
+
+        # lazy init
+        if not self._pygame_initialized:
+            pygame.init()
+            self._screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+            pygame.display.set_caption("Vine Environment")
+            self._clock = pygame.time.Clock()
+            self._pygame_initialized = True
+
+        # handle quit
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                self._pygame_initialized = False
+                return
+
+        self._screen.fill((240, 240, 240))
+
+        def world_to_screen(pos):
+            fx = max(self.field_size[0], 1e-6)
+            fy = max(self.field_size[1], 1e-6)
+
+            x = (pos[0] - self.x_min) / fx * SCREEN_W
+            y = (pos[1] - self.y_min) / fy * SCREEN_H
+
+            return int(x), int(y)
+
+        # collection point
+        cp = world_to_screen(self.collection_point)
+        pygame.draw.circle(self._screen, (255, 215, 0), cp, 10)
+
+        # vines
+        for v in self.vines:
+            x, y = world_to_screen(v.position)
+            pygame.draw.rect(self._screen, (34, 139, 34), (x, y, 10, 10))
+
+        # humans
+        for i, h in enumerate(self.humans):
+            x, y = world_to_screen(h.position)
+            pygame.draw.circle(self._screen, (30, 144, 255), (x, y), 8)
+
+        # drones
+        for d in self.drones:
+            x, y = world_to_screen(d.position)
+            pygame.draw.polygon(
+                self._screen,
+                (220, 20, 60),
+                [(x, y - 8), (x - 8, y + 8), (x + 8, y + 8)],
+            )
+
+        pygame.display.flip()
+        self._clock.tick(10)
 
     def render(self):
-        if self.render_mode != "terminal":
+        # ---------- terminal render ----------
+        if self.render_mode == "terminal":
             print(f"Step {self.steps} | delivered={self.delivered}")
-
-        for i, v in enumerate(self.vines):
-            print(f"  Vine {i}: rem={v.boxes_remaining} queued={v.queued_boxes} pos={v.position}")
-        for i, h in enumerate(self.humans):
-            print(f"  Human {i}: vine={h.assigned_vine} busy={h.busy} t={h.time_left:.1f} has_box={h.has_box} fat={h.fatigue:.2f}")
-        for i, d in enumerate(self.drones):
-            print(f"  Drone {i}: status={d.status} busy={d.busy} t={d.time_left:.1f} has_box={d.has_box} pos={d.position}")
-        print("====================================================")
-
-        if self.render_mode != "human":
+            for i, v in enumerate(self.vines):
+                print(f"  Vine {i}: rem={v.boxes_remaining} queued={v.queued_boxes} pos={v.position}")
+            for i, h in enumerate(self.humans):
+                print(f"  Human {i}: vine={h.assigned_vine} busy={h.busy} t={h.time_left:.1f} has_box={h.has_box} fat={h.fatigue:.2f}")
+            for i, d in enumerate(self.drones):
+                print(f"  Drone {i}: status={d.status} busy={d.busy} t={d.time_left:.1f} has_box={d.has_box} pos={d.position}")
+            print("====================================================")
             return
 
-        fig, ax = plt.subplots(figsize=(6, 6))
-        ax.set_title(f"Step {self.steps}, Delivered {self.delivered}")
-        ax.set_xlim(0, self.field_size[0])
-        ax.set_ylim(0, self.field_size[1])
-
-        # draw collection point
-        cp = self.collection_point
-        ax.scatter(cp[0], cp[1], c="gold", marker="*", s=200, label="Collection Point")
-
-        # draw vines
-        for i, v in enumerate(self.vines):
-            ax.scatter(v.position[0], v.position[1], c="green", marker="s", s=100)
-            ax.text(
-                v.position[0],
-                v.position[1] + 0.3,
-                f"R:{v.boxes_remaining}\nQ:{v.queued_boxes}",
-                fontsize=8,
-                ha="center",
-            )
-
-        # draw humans
-        for i, h in enumerate(self.humans):
-            ax.scatter(h.position[0], h.position[1], c="blue", marker="o", s=100)
-            ax.text(
-                h.position[0],
-                h.position[1] - 0.3,
-                f"H{i}",
-                fontsize=8,
-                ha="center",
-            )
-
-        # draw drones
-        for i, d in enumerate(self.drones):
-            ax.scatter(d.position[0], d.position[1], c="red", marker="^", s=100)
-            ax.text(
-                d.position[0],
-                d.position[1] - 0.3,
-                f"D{i}",
-                fontsize=8,
-                ha="center",
-            )
-
-        ax.legend(loc="upper right")
-        plt.show()       
+        # ---------- pygame render ----------
+        if self.render_mode == "human":
+            self._render_pygame()
+    
 
 def my_check_env():
     from gymnasium.utils.env_checker import check_env
@@ -397,7 +546,7 @@ if __name__ == "__main__":
     # done = False
     plt.ion()
 
-    env = gym.make("VineEnv-v0", render_mode="human")
+    env = gym.make("VineEnv-v0", render_mode="human", topology_mode="row")
     obs, info = env.reset()
 
     done = False
