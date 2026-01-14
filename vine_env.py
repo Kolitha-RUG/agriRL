@@ -4,6 +4,7 @@ from gymnasium import spaces
 from gymnasium.envs.registration import register
 import matplotlib.pyplot as plt
 import pandas as pd
+import pygame
 
 # Register once (ensure the module path matches your filename)
 register(
@@ -248,6 +249,10 @@ class VineEnv(gym.Env):
             self.steps = 0
             self.delivered = 0
 
+            # Calculate collection point first (center of vineyard)
+            self.collection_point = np.array([np.max(xs), np.mean(ys)],
+                                        dtype=np.float32)
+
             # Humans start at their assigned vine position (simple first version)
             self.humans = []
             for h in range(self.num_humans):
@@ -257,8 +262,6 @@ class VineEnv(gym.Env):
 
             # Drones start at collection point
             self.drones = [Drone(self.collection_point.copy()) for _ in range(self.num_drones)]
-            self.collection_point = np.array([np.mean(xs), np.mean(ys)],
-                                        dtype=np.float32)
 
             return self._get_obs(), {}
     
@@ -413,8 +416,10 @@ class VineEnv(gym.Env):
         # collection point
         obs.extend(norm_pos(self.collection_point))
 
+        # Use actual max values for normalization
+        max_boxes_actual = max(v.total_boxes for v in self.vines) if self.vines else 1
         for v in self.vines:
-            obs.append(v.boxes_remaining / max(self.max_boxes_per_vine, 1))
+            obs.append(v.boxes_remaining / max(max_boxes_actual, 1))
 
         for v in self.vines:
             obs.append(v.queued_boxes / max(self.max_backlog, 1))
@@ -451,16 +456,13 @@ class VineEnv(gym.Env):
 
         obs = np.asarray(obs, dtype=np.float32)
 
-        # --- optional safety check (recommended while debugging) ---
-        # assert np.all(obs >= -1e-6) and np.all(obs <= 1.0 + 1e-6), "Obs out of bounds!"
-
         return obs
 
 
     def _render_pygame(self):
-        import pygame
-
+        
         SCREEN_W, SCREEN_H = 800, 800
+        PADDING = 40 
 
         # lazy init
         if not self._pygame_initialized:
@@ -479,12 +481,20 @@ class VineEnv(gym.Env):
 
         self._screen.fill((240, 240, 240))
 
+        fx = max(self.field_size[0], 1e-6)
+        fy = max(self.field_size[1], 1e-6)
+        scale = min(
+            (SCREEN_W - 2 * PADDING) / fx,
+            (SCREEN_H - 2 * PADDING) / fy,
+            )
+        
         def world_to_screen(pos):
-            fx = max(self.field_size[0], 1e-6)
-            fy = max(self.field_size[1], 1e-6)
+            x = (pos[0] - self.x_min) * scale + PADDING
+            y = (pos[1] - self.y_min) * scale + PADDING
 
-            x = (pos[0] - self.x_min) / fx * SCREEN_W
-            y = (pos[1] - self.y_min) / fy * SCREEN_H
+            # clamp for safety
+            x = max(0, min(SCREEN_W - 1, x))
+            y = max(0, min(SCREEN_H - 1, y))
 
             return int(x), int(y)
 
@@ -544,9 +554,7 @@ if __name__ == "__main__":
     # env = gym.make('VineEnv-v0', render_mode="human")
     # obs, info = env.reset()
     # done = False
-    plt.ion()
-
-    env = gym.make("VineEnv-v0", render_mode="human", topology_mode="row")
+    env = gym.make("VineEnv-v0", render_mode="human", topology_mode="full")
     obs, info = env.reset()
 
     done = False
