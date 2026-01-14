@@ -196,7 +196,3 @@ The RL agent learns to coordinate human actions by:
 - [Gymnasium Documentation](https://gymnasium.farama.org/)
 - [Stable Baselines3](https://stable-baselines3.readthedocs.io/)
 - [PPO Algorithm](https://arxiv.org/abs/1707.06347)
-
-## Contact
-
-[Your contact information]
