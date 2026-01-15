@@ -163,21 +163,22 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.agents = self.possible_agents.copy()
 
         self.obs_dim = (
-            self.num_vines * 2
-            + 2
-            + self.num_vines
-            + self.num_vines
-            + 2
-            + 1
-            + self.num_actions
-            + 1
-            + self.num_vines
-            + (self.num_humans - 1) * 2
-            + (self.num_humans - 1)
-            + self.num_drones * 2
-            + self.num_drones * self.num_drone_status
-            + self.num_drones
-            + self.num_drones  # Battery levels
+            self.num_vines * 2              # vine positions
+            + 2                             # collection point
+            + 2                             # charging point  <-- ADD THIS
+            + self.num_vines                # boxes_remaining
+            + self.num_vines                # queued_boxes
+            + 2                             # own position
+            + 1                             # fatigue
+            + self.num_actions              # current action one-hot
+            + 1                             # own has_box
+            + self.num_vines                # assigned_vine one-hot
+            + (self.num_humans - 1) * 2     # other humans positions
+            + (self.num_humans - 1)         # other humans has_box
+            + self.num_drones * 2           # drone positions
+            + self.num_drones * self.num_drone_status  # drone status one-hot
+            + self.num_drones               # drone has_box
+            + self.num_drones               # drone battery
         )
 
         self.observation_spaces = {
