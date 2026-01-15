@@ -16,6 +16,9 @@ ACTION_ENQUEUE = 2
 DRONE_IDLE = 0
 DRONE_GO_TO_VINE = 1
 DRONE_DELIVER = 2
+DRONE_GO_TO_CHARGE = 3
+DRONE_CHARGE = 4
+
 
 
 def compute_num_vines(topology_mode: str, vineyard_file: str) -> int:
@@ -79,6 +82,7 @@ class Drone:
         self.time_left = 0.0
         self.target_vine: Optional[int] = None
         self.delivered_count = 0
+        self.battery = 100.0
 
 
 class MultiAgentVineEnv(MultiAgentEnv):
@@ -153,7 +157,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # Everything else stays the same from your original __init__
         self.num_vines = compute_num_vines(self.topology_mode, self.vineyard_file)
         self.num_actions = 3
-        self.num_drone_status = 3
+        self.num_drone_status = 5
 
         self.possible_agents = [f"human_{i}" for i in range(self.num_humans)]
         self.agents = self.possible_agents.copy()
@@ -173,6 +177,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
             + self.num_drones * 2
             + self.num_drones * self.num_drone_status
             + self.num_drones
+            + self.num_drones  # Battery levels
         )
 
         self.observation_spaces = {
@@ -192,6 +197,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.humans = []
         self.drones = []
         self.collection_point = np.array([0.5, 0.5], dtype=np.float32)
+        self.charging_point = np.array([0.0, 0.0], dtype=np.float32) # Will be updated in reset
         self.field_size = np.array([1.0, 1.0], dtype=np.float32)
         self.x_min = 0.0
         self.y_min = 0.0
@@ -280,6 +286,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         
         # Collection point at right edge, center height
         self.collection_point = np.array([xs.max(), np.mean(ys)], dtype=np.float32)
+        self.charging_point = np.array([self.x_min, self.y_min], dtype=np.float32)
         
         # Initialize counters
         self.steps = 0
@@ -411,16 +418,49 @@ class MultiAgentVineEnv(MultiAgentEnv):
                             
                     elif d.status == DRONE_DELIVER:
                         d.position = self.collection_point.copy()
+                        d.battery = max(0.0, d.battery - 10.0) # Reduce battery on buffer transport
                         if d.has_box:
                             d.has_box = False
                             self.delivered += 1
                             d.delivered_count += 1
+                        
                         d.status = DRONE_IDLE
                         d.target_vine = None
+                    
+                    elif d.status == DRONE_GO_TO_CHARGE:
+                        d.position = self.charging_point.copy()
+                        d.battery = max(0.0, d.battery - 10.0) # Cost to get to charger
+                        d.status = DRONE_CHARGE
+                        # Wait time for charging? Let's say it takes 1 step to start charging, 
+                        # or we can just apply charging in the IDLE/CHARGE logic below.
+                        # For now, let's keep it busy for a moment or just switch state.
+                        d.busy = False 
+                        
         
-        # 4) Assign idle drones to nearest queued vine
+        # 3.5) Charging logic (for drones at charger)
+        for d in self.drones:
+            if d.status == DRONE_CHARGE and not d.busy:
+                # Charge up
+                d.battery += 1.0 # Charge speed
+                if d.battery >= 100.0:
+                    d.battery = 100.0
+                    d.status = DRONE_IDLE
+                else:
+                    # Still charging, consume a step
+                    pass
+        
+        # 4) Assign idle drones
         for d in self.drones:
             if (not d.busy) and d.status == DRONE_IDLE:
+                
+                # Check battery first
+                if d.battery <= 20.0:
+                    d.status = DRONE_GO_TO_CHARGE
+                    dist = float(np.linalg.norm(d.position - self.charging_point))
+                    d.busy = True
+                    d.time_left = dist / max(self.drone_speed, 1e-6)
+                    continue
+
                 candidates = [idx for idx, v in enumerate(self.vines) if v.queued_boxes > 0]
                 if candidates:
                     dists = [np.linalg.norm(self.vines[idx].position - d.position) for idx in candidates]
@@ -507,6 +547,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # Collection point (normalized)
         obs.extend(self._normalize_position(self.collection_point))
         
+        # Charging point (normalized)
+        obs.extend(self._normalize_position(self.charging_point))
+        
         # Boxes remaining per vine (normalized)
         max_boxes_actual = max(v.total_boxes for v in self.vines) if self.vines else 1
         for v in self.vines:
@@ -555,6 +598,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
         
         for d in self.drones:
             obs.append(1.0 if d.has_box else 0.0)
+            
+        for d in self.drones:
+            obs.append(d.battery / 100.0)
 
         obs = np.array(obs, dtype=np.float32)
         return np.clip(obs, 0.0, 1.0)
@@ -577,7 +623,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
                   f"t={h.time_left:.1f} has_box={h.has_box} fat={h.fatigue:.2f}")
         for i, d in enumerate(self.drones):
             print(f"  Drone {i}: status={d.status} busy={d.busy} "
-                  f"t={d.time_left:.1f} has_box={d.has_box}")
+                  f"t={d.time_left:.1f} bat={d.battery:.1f}")
         print("=" * 60)
 
     def _render_pygame(self):
@@ -616,6 +662,10 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # Collection point (gold)
         cp = world_to_screen(self.collection_point)
         pygame.draw.circle(self._screen, (255, 215, 0), cp, 10)
+        
+        # Charging point (Purple)
+        chp = world_to_screen(self.charging_point)
+        pygame.draw.rect(self._screen, (138, 43, 226), (chp[0]-8, chp[1]-8, 16, 16))
         
         # Vines (green)
         for v in self.vines:
@@ -656,9 +706,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         # Drone stats
         for i, d in enumerate(self.drones):
-            status_name = ["IDLE","GO_TO_VINE","DELIVER"][d.status]
-            has_box_txt = "T" if d.has_box else "F"
-            stats = f"Drone {i}: {status_name} | Has Box: {has_box_txt} | Delivered: {d.delivered_count}"
+            status_name = ["IDLE","GO_TO_VINE","DELIVER", "GO_TO_CHRG", "CHARGING"][d.status]
+            stats = f"Drone {i}: {status_name} | Bat: {d.battery:.0f} | Del: {d.delivered_count}"
             text_surf = font.render(stats, True, TEXT_COLOR)
             self._screen.blit(text_surf, (SCREEN_W - 380, line_y))
             line_y += 24
