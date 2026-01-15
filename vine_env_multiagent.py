@@ -61,6 +61,7 @@ class Human:
         self.assigned_vine = int(assigned_vine)
         self.fatigue = 0.0
         self.has_box = False
+
         self.current_action = ACTION_HARVEST
         self.busy = False
         self.time_left = 0.0
@@ -77,6 +78,7 @@ class Drone:
         self.busy = False
         self.time_left = 0.0
         self.target_vine: Optional[int] = None
+        self.delivered_count = 0
 
 
 class MultiAgentVineEnv(MultiAgentEnv):
@@ -125,8 +127,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
         drone_speed: float = 1.0,
         vineyard_file: str = "data/Vinha_Maria_Teresa_RL.xlsx",
         reward_delivery: float = 1.0,
-        reward_backlog_penalty: float = 0.1,
-        reward_fatigue_penalty: float = 0.1,
+        reward_backlog_penalty: float = 0.5,
+        reward_fatigue_penalty: float = 0.5,
     ):
         super().__init__()
         
@@ -239,6 +241,14 @@ class MultiAgentVineEnv(MultiAgentEnv):
             vines.append(v)
             
         return vines
+    
+    def _find_next_vine(self, from_pos: np.ndarray) -> Optional[int]:
+        candidates = [i for i, v in enumerate(self.vines) if v.boxes_remaining > 0]
+        if not candidates:
+            return None
+        dists = [np.linalg.norm(self.vines[i].position - from_pos) for i in candidates]
+        return candidates[int(np.argmin(dists))]
+
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict, Dict]:
         """
@@ -318,7 +328,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         for i, h in enumerate(self.humans):
             if h.busy:
                 h.time_left -= self.dt
-                h.fatigue = float(np.clip(h.fatigue + 0.02 * self.dt, 0.0, 1.0))
+                
                 
                 if h.time_left <= 0.0:
                     h.busy = False
@@ -326,13 +336,23 @@ class MultiAgentVineEnv(MultiAgentEnv):
                     
                     if h.current_action == ACTION_HARVEST:
                         h.has_box = True
+                        h.fatigue = float(np.clip(h.fatigue - 0.001 * self.dt, 0.0, 1.0))
                     elif h.current_action == ACTION_TRANSPORT:
                         if h.has_box:
                             h.has_box = False
+                            h.fatigue = float(np.clip(h.fatigue + 0.02 * self.dt, 0.0, 1.0))
                             self.delivered += 1
                             h.delivered_count += 1
                             individual_deliveries[i] = 1
                         h.position = self.collection_point.copy()
+            if (not h.busy) and (not h.has_box):
+                cur_v = self.vines[h.assigned_vine]
+                if cur_v.boxes_remaining <= 0:
+                    nxt = self._find_next_vine(h.position)
+                    if nxt is not None:
+                        h.assigned_vine = nxt
+                        # optional: snap them to the new vine visually
+                        h.position = self.vines[nxt].position.copy()
         
         # 2) Apply new decisions for humans that are free
         for i, agent_id in enumerate(self.agents):
@@ -394,6 +414,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
                         if d.has_box:
                             d.has_box = False
                             self.delivered += 1
+                            d.delivered_count += 1
                         d.status = DRONE_IDLE
                         d.target_vine = None
         
@@ -601,7 +622,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
             x, y = world_to_screen(v.position)
             pygame.draw.rect(self._screen, (34, 139, 34), (x, y, 10, 10))
             font = pygame.font.SysFont(None, 18)
-            text_str = f"{v.boxes_remaining}/{v.total_boxes} _ {v.queued_boxes} q"
+            text_str = f"{v.boxes_remaining}_{v.queued_boxes}"
             text_surf = font.render(text_str, True, TEXT_COLOR)
             self._screen.blit(text_surf, (x + 12, y - 10))
 
@@ -622,7 +643,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
             )
         
             # --- DRAW STATS UPPER RIGHT ---
-        font = pygame.font.SysFont(None, 22)
+        font = pygame.font.SysFont(None, 18)
         line_y = 10
 
         # Humans stats
@@ -636,13 +657,14 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # Drone stats
         for i, d in enumerate(self.drones):
             status_name = ["IDLE","GO_TO_VINE","DELIVER"][d.status]
-            has_box_txt = "✔" if d.has_box else "✖"
-            stats = f"Drone {i}: {status_name} | Has Box: {has_box_txt}"
+            has_box_txt = "T" if d.has_box else "F"
+            stats = f"Drone {i}: {status_name} | Has Box: {has_box_txt} | Delivered: {d.delivered_count}"
             text_surf = font.render(stats, True, TEXT_COLOR)
             self._screen.blit(text_surf, (SCREEN_W - 380, line_y))
             line_y += 24
-            pygame.display.flip()
-            self._clock.tick(10)
+
+        pygame.display.flip()
+        self._clock.tick(10)
 
     def close(self):
         """Clean up resources."""
@@ -660,7 +682,7 @@ def test_environment():
     env = MultiAgentVineEnv(
         render_mode="human",
         topology_mode="row",
-        num_humans=2,
+        num_humans=3,
         num_drones=1,
         max_boxes_per_vine=1,
         max_backlog=5,
