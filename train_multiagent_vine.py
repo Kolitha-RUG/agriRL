@@ -55,8 +55,8 @@ def get_env_config(
         "render_mode": "terminal",
         # Reward shaping
         "reward_delivery": 1.0,
-        "reward_backlog_penalty": 0.01,
-        "reward_fatigue_penalty": 0.001,
+        "reward_backlog_penalty": 0.1,
+        "reward_fatigue_penalty": 0.1,
     }
 
 
@@ -92,7 +92,7 @@ def create_shared_policy_config(
             entropy_coeff=0.01,
             vf_loss_coeff=0.5,
             num_sgd_iter=10,
-            sgd_minibatch_size=128,
+            minibatch_size=128,
         )
         .multi_agent(
             policy_mapping_fn=policy_mapping_fn,
@@ -146,7 +146,7 @@ def create_independent_policy_config(
             entropy_coeff=0.01,
             vf_loss_coeff=0.5,
             num_sgd_iter=10,
-            sgd_minibatch_size=128,
+            minibatch_size=128,
         )
         .multi_agent(
             policy_mapping_fn=policy_mapping_fn,
@@ -202,7 +202,7 @@ def create_centralized_critic_config(
             entropy_coeff=0.01,
             vf_loss_coeff=0.5,
             num_sgd_iter=10,
-            sgd_minibatch_size=128,
+            minibatch_size=128,
         )
         .multi_agent(
             policy_mapping_fn=policy_mapping_fn,

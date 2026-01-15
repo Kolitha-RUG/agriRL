@@ -64,6 +64,7 @@ class Human:
         self.current_action = ACTION_HARVEST
         self.busy = False
         self.time_left = 0.0
+        self.delivered_count = 0
 
 
 class Drone:
@@ -109,95 +110,92 @@ class MultiAgentVineEnv(MultiAgentEnv):
     
     metadata = {"render_modes": ["terminal", "human"], "render_fps": 100}
 
-    def __init__(self, config: Optional[Dict] = None):
+    def __init__(
+        self,
+        render_mode: str = "terminal",
+        topology_mode: str = "row",
+        num_humans: int = 2,
+        num_drones: int = 1,
+        max_boxes_per_vine: int = 10,
+        max_backlog: int = 10,
+        max_steps: int = 2000,
+        dt: float = 1.0,
+        harvest_time: float = 10.0,
+        human_speed: float = 0.5,
+        drone_speed: float = 1.0,
+        vineyard_file: str = "data/Vinha_Maria_Teresa_RL.xlsx",
+        reward_delivery: float = 1.0,
+        reward_backlog_penalty: float = 0.1,
+        reward_fatigue_penalty: float = 0.1,
+    ):
         super().__init__()
         
-        # Parse config with defaults
-        config = config or {}
-        self.render_mode = config.get("render_mode", "terminal")
-        self.topology_mode = config.get("topology_mode", "row")
-        self.num_humans = config.get("num_humans", 2)
-        self.num_drones = config.get("num_drones", 1)
-        self.max_boxes_per_vine = config.get("max_boxes_per_vine", 10)
-        self.max_backlog = config.get("max_backlog", 10)
-        self.max_steps = config.get("max_steps", 200)
-        self.dt = float(config.get("dt", 1.0))
-        self.harvest_time = float(config.get("harvest_time", 8.0))
-        self.human_speed = float(config.get("human_speed", 1.0))
-        self.drone_speed = float(config.get("drone_speed", 2.0))
-        self.vineyard_file = config.get("vineyard_file", "data/Vinha_Maria_Teresa_RL.xlsx")
-        
-        # Reward shaping parameters
-        self.reward_delivery = config.get("reward_delivery", 1.0)
-        self.reward_backlog_penalty = config.get("reward_backlog_penalty", 0.01)
-        self.reward_fatigue_penalty = config.get("reward_fatigue_penalty", 0.001)
-        
-        # Compute environment dimensions
+        # Direct assignments (no dict)
+        self.render_mode = render_mode
+        self.topology_mode = topology_mode
+        self.num_humans = num_humans
+        self.num_drones = num_drones
+        self.max_boxes_per_vine = max_boxes_per_vine
+        self.max_backlog = max_backlog
+        self.max_steps = max_steps
+        self.dt = float(dt)
+        self.harvest_time = float(harvest_time)
+        self.human_speed = float(human_speed)
+        self.drone_speed = float(drone_speed)
+        self.vineyard_file = vineyard_file
+
+        self.reward_delivery = float(reward_delivery)
+        self.reward_backlog_penalty = float(reward_backlog_penalty)
+        self.reward_fatigue_penalty = float(reward_fatigue_penalty)
+
+        # Everything else stays the same from your original __init__
         self.num_vines = compute_num_vines(self.topology_mode, self.vineyard_file)
         self.num_actions = 3
         self.num_drone_status = 3
-        
-        # Define agent IDs
+
         self.possible_agents = [f"human_{i}" for i in range(self.num_humans)]
         self.agents = self.possible_agents.copy()
-        
-        # Calculate observation dimension per agent
-        # Each agent observes:
-        # - Vine positions: num_vines * 2
-        # - Collection point: 2
-        # - Boxes remaining per vine: num_vines (normalized)
-        # - Queued boxes per vine: num_vines (normalized)
-        # - Own position: 2
-        # - Own fatigue: 1
-        # - Own current action (one-hot): num_actions
-        # - Own has_box: 1
-        # - Own assigned_vine (one-hot): num_vines
-        # - Other humans' positions: (num_humans - 1) * 2
-        # - Other humans' has_box: (num_humans - 1)
-        # - Drone positions: num_drones * 2
-        # - Drone status (one-hot): num_drones * num_drone_status
-        # - Drone has_box: num_drones
-        
+
         self.obs_dim = (
-            self.num_vines * 2  # vine positions
-            + 2  # collection point
-            + self.num_vines  # boxes remaining
-            + self.num_vines  # queued boxes
-            + 2  # own position
-            + 1  # own fatigue
-            + self.num_actions  # own action one-hot
-            + 1  # own has_box
-            + self.num_vines  # own assigned_vine one-hot
-            + (self.num_humans - 1) * 2  # other humans' positions
-            + (self.num_humans - 1)  # other humans' has_box
-            + self.num_drones * 2  # drone positions
-            + self.num_drones * self.num_drone_status  # drone status
-            + self.num_drones  # drone has_box
+            self.num_vines * 2
+            + 2
+            + self.num_vines
+            + self.num_vines
+            + 2
+            + 1
+            + self.num_actions
+            + 1
+            + self.num_vines
+            + (self.num_humans - 1) * 2
+            + (self.num_humans - 1)
+            + self.num_drones * 2
+            + self.num_drones * self.num_drone_status
+            + self.num_drones
         )
-        
-        # Define observation and action spaces for each agent
+
         self.observation_spaces = {
             agent_id: spaces.Box(low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32)
             for agent_id in self.possible_agents
         }
-        
         self.action_spaces = {
             agent_id: spaces.Discrete(self.num_actions)
             for agent_id in self.possible_agents
         }
-        
-        # Initialize state variables (will be set in reset)
-        self.vines: List[Vine] = []
-        self.humans: List[Human] = []
-        self.drones: List[Drone] = []
+
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32)
+        self.action_space = spaces.Discrete(self.num_actions)
+
+        # init state vars (unchanged)
+        self.vines = []
+        self.humans = []
+        self.drones = []
         self.collection_point = np.array([0.5, 0.5], dtype=np.float32)
         self.field_size = np.array([1.0, 1.0], dtype=np.float32)
         self.x_min = 0.0
         self.y_min = 0.0
         self.steps = 0
         self.delivered = 0
-        
-        # Pygame rendering
+
         self._pygame_initialized = False
         self._screen = None
         self._clock = None
@@ -320,7 +318,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         for i, h in enumerate(self.humans):
             if h.busy:
                 h.time_left -= self.dt
-                h.fatigue = float(np.clip(h.fatigue + 0.002 * self.dt, 0.0, 1.0))
+                h.fatigue = float(np.clip(h.fatigue + 0.02 * self.dt, 0.0, 1.0))
                 
                 if h.time_left <= 0.0:
                     h.busy = False
@@ -332,6 +330,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
                         if h.has_box:
                             h.has_box = False
                             self.delivered += 1
+                            h.delivered_count += 1
                             individual_deliveries[i] = 1
                         h.position = self.collection_point.copy()
         
@@ -462,10 +461,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
     def _normalize_position(self, pos: np.ndarray) -> np.ndarray:
         """Normalize a position to [0, 1] range."""
-        return np.array([
-            (pos[0] - self.x_min) / max(self.field_size[0], 1e-6),
-            (pos[1] - self.y_min) / max(self.field_size[1], 1e-6),
-        ], dtype=np.float32)
+        x = (pos[0] - self.x_min) / max(self.field_size[0], 1e-6)
+        y = (pos[1] - self.y_min) / max(self.field_size[1], 1e-6)
+        return np.clip(np.array([x, y], dtype=np.float32), 0.0, 1.0)
 
     def _get_obs_for_agent(self, agent_idx: int) -> np.ndarray:
         """
@@ -536,8 +534,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
         
         for d in self.drones:
             obs.append(1.0 if d.has_box else 0.0)
-        
-        return np.array(obs, dtype=np.float32)
+
+        obs = np.array(obs, dtype=np.float32)
+        return np.clip(obs, 0.0, 1.0)
 
     def render(self):
         """Render the environment."""
@@ -561,10 +560,12 @@ class MultiAgentVineEnv(MultiAgentEnv):
         print("=" * 60)
 
     def _render_pygame(self):
+        
         """Pygame visual rendering."""
         SCREEN_W, SCREEN_H = 800, 800
         PADDING = 40
-        
+        TEXT_COLOR = (0, 0, 0)
+
         if not self._pygame_initialized:
             pygame.init()
             self._screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
@@ -599,7 +600,11 @@ class MultiAgentVineEnv(MultiAgentEnv):
         for v in self.vines:
             x, y = world_to_screen(v.position)
             pygame.draw.rect(self._screen, (34, 139, 34), (x, y, 10, 10))
-        
+            font = pygame.font.SysFont(None, 18)
+            text_str = f"{v.boxes_remaining}/{v.total_boxes} _ {v.queued_boxes} q"
+            text_surf = font.render(text_str, True, TEXT_COLOR)
+            self._screen.blit(text_surf, (x + 12, y - 10))
+
         # Humans (blue with different shades for each agent)
         colors = [(30, 144, 255), (65, 105, 225), (0, 0, 205), (25, 25, 112)]
         for i, h in enumerate(self.humans):
@@ -616,8 +621,28 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 [(x, y - 8), (x - 8, y + 8), (x + 8, y + 8)],
             )
         
-        pygame.display.flip()
-        self._clock.tick(10)
+            # --- DRAW STATS UPPER RIGHT ---
+        font = pygame.font.SysFont(None, 22)
+        line_y = 10
+
+        # Humans stats
+        for i, h in enumerate(self.humans):
+            action_name = ["HARVEST", "TRANSPORT", "ENQUEUE"][h.current_action]
+            stats = f"H{i}: {action_name} | Fatigue: {h.fatigue:.2f} | Delivered: {h.delivered_count}"
+            text_surf = font.render(stats, True, TEXT_COLOR)
+            self._screen.blit(text_surf, (SCREEN_W - 380, line_y))
+            line_y += 24
+
+        # Drone stats
+        for i, d in enumerate(self.drones):
+            status_name = ["IDLE","GO_TO_VINE","DELIVER"][d.status]
+            has_box_txt = "✔" if d.has_box else "✖"
+            stats = f"Drone {i}: {status_name} | Has Box: {has_box_txt}"
+            text_surf = font.render(stats, True, TEXT_COLOR)
+            self._screen.blit(text_surf, (SCREEN_W - 380, line_y))
+            line_y += 24
+            pygame.display.flip()
+            self._clock.tick(10)
 
     def close(self):
         """Clean up resources."""
@@ -630,131 +655,36 @@ class MultiAgentVineEnv(MultiAgentEnv):
 # Training Example
 # ============================================================================
 
-def example_training_config():
-    """
-    Example RLlib configuration for training with the multi-agent environment.
-    
-    This demonstrates how to set up PPO training with multiple policies.
-    """
-    from ray.rllib.algorithms.ppo import PPOConfig
-    from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
-    from ray.rllib.core.rl_module.rl_module import RLModuleSpec
-    from ray.tune.registry import register_env
-    
-    # Register the environment
-    register_env(
-        "MultiAgentVineEnv",
-        lambda config: MultiAgentVineEnv(config)
-    )
-    
-    # Environment config
-    env_config = {
-        "topology_mode": "row",
-        "num_humans": 2,
-        "num_drones": 1,
-        "max_boxes_per_vine": 10,
-        "max_steps": 200,
-        "render_mode": "terminal",
-    }
-    
-    # Create a temporary env to get agent IDs
-    temp_env = MultiAgentVineEnv(env_config)
-    agent_ids = temp_env.possible_agents
-    temp_env.close()
-    
-    # Option 1: Shared policy (all agents use the same policy)
-    def shared_policy_mapping(agent_id, episode, **kwargs):
-        return "shared_policy"
-    
-    config_shared = (
-        PPOConfig()
-        .environment(env="MultiAgentVineEnv", env_config=env_config)
-        .multi_agent(
-            policy_mapping_fn=shared_policy_mapping,
-        )
-        .rl_module(
-            rl_module_spec=MultiRLModuleSpec(
-                rl_module_specs={
-                    "shared_policy": RLModuleSpec(),
-                }
-            ),
-        )
-    )
-    
-    # Option 2: Independent policies (each agent has its own policy)
-    def independent_policy_mapping(agent_id, episode, **kwargs):
-        return agent_id  # Each agent uses its own policy
-    
-    config_independent = (
-        PPOConfig()
-        .environment(env="MultiAgentVineEnv", env_config=env_config)
-        .multi_agent(
-            policy_mapping_fn=independent_policy_mapping,
-        )
-        .rl_module(
-            rl_module_spec=MultiRLModuleSpec(
-                rl_module_specs={
-                    agent_id: RLModuleSpec() for agent_id in agent_ids
-                }
-            ),
-        )
-    )
-    
-    return config_shared, config_independent
-
-
 def test_environment():
-    """Test the multi-agent environment with random actions."""
-    print("Testing MultiAgentVineEnv...")
-    
-    config = {
-        "topology_mode": "row",
-        "num_humans": 2,
-        "num_drones": 1,
-        "max_boxes_per_vine": 5,
-        "max_steps": 5000,
-        "render_mode": "human",
-    }
-    
-    env = MultiAgentVineEnv(config)
-    
-    print(f"\nPossible agents: {env.possible_agents}")
-    print(f"Observation space: {env.observation_spaces}")
-    print(f"Action space: {env.action_spaces}")
-    
-    obs, info = env.reset()
-    print(f"\nInitial observations keys: {obs.keys()}")
-    print(f"Observation shape for human_0: {obs['human_0'].shape}")
-    
-    total_rewards = {agent_id: 0.0 for agent_id in env.possible_agents}
-    done = False
-    step = 0
-    
-    while not done:
-        # Sample random actions for all agents
-        actions = {
-            agent_id: env.action_spaces[agent_id].sample()
-            for agent_id in env.agents
-        }
-        
-        obs, rewards, terminateds, truncateds, infos = env.step(actions)
-        
-        for agent_id, reward in rewards.items():
-            total_rewards[agent_id] += reward
-        
-        if step % 10 == 0:
-            env.render()
-        
-        done = terminateds["__all__"] or truncateds["__all__"]
-        step += 1
-    
-    print(f"\nEpisode finished after {step} steps")
-    print(f"Total rewards: {total_rewards}")
-    print(f"Total delivered: {env.delivered}")
-    
-    env.close()
-    print("\nTest completed successfully!")
+    """Test the Multi-Agent Vine Environment."""
+    env = MultiAgentVineEnv(
+        render_mode="human",
+        topology_mode="row",
+        num_humans=2,
+        num_drones=1,
+        max_boxes_per_vine=1,
+        max_backlog=5,
+        max_steps=10000,
+        dt=1.0,
+        harvest_time=5.0,
+        human_speed=0.5,
+        drone_speed=1.0,
+        vineyard_file="data/Vinha_Maria_Teresa_RL.xlsx",
+    )
 
+    observations, infos = env.reset()
+    done = {"__all__": False}
+
+    while not done["__all__"]:
+        action_dict = {}
+        for agent_id in env.agents:
+            action_dict[agent_id] = env.action_space.sample()
+        
+        observations, rewards, terminateds, truncateds, infos = env.step(action_dict)
+        done = {**terminateds, **truncateds}
+        env.render()
+
+    env.close()
 
 if __name__ == "__main__":
     test_environment()
