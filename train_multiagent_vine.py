@@ -21,7 +21,7 @@ def main():
     env_config = dict(
         render_mode="terminal",
         topology_mode="row",
-        num_humans=3,
+        num_humans=2,
         num_drones=1,
         max_boxes_per_vine=1,
         max_backlog=5,
@@ -71,7 +71,9 @@ def main():
             entropy_coeff=0.01,
             vf_clip_param=10.0,
         )
-        .resources(num_gpus=0)
+        .resources(num_gpus=1,
+                    num_gpus_per_worker=0.5
+                   )
         .multi_agent(
             policies=policies,
             policy_mapping_fn=policy_mapping_fn,
