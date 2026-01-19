@@ -121,7 +121,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         render_mode: str = "terminal",
         topology_mode: str = "row",
         num_humans: int = 2,
-        num_drones: int = 2,
+        num_drones: int = 1,
         max_boxes_per_vine: int = 10,
         max_backlog: int = 10,
         max_steps: int = 2000,
@@ -249,8 +249,11 @@ class MultiAgentVineEnv(MultiAgentEnv):
             
         return vines
     
-    def _find_next_vine(self, from_pos: np.ndarray) -> Optional[int]:
-        candidates = [i for i, v in enumerate(self.vines) if v.boxes_remaining > 0]
+    def _find_next_vine(self, from_pos: np.ndarray, exclude_vines: Optional[set] = None,) -> Optional[int]:
+        if exclude_vines is None:
+            exclude_vines = set()
+        
+        candidates = [i for i, v in enumerate(self.vines) if v.boxes_remaining > 0 and i not in exclude_vines]
         if not candidates:
             return None
         dists = [np.linalg.norm(self.vines[i].position - from_pos) for i in candidates]
@@ -355,11 +358,17 @@ class MultiAgentVineEnv(MultiAgentEnv):
                         h.position = self.collection_point.copy()
             if (not h.busy) and (not h.has_box):
                 cur_v = self.vines[h.assigned_vine]
+
                 if cur_v.boxes_remaining <= 0:
-                    nxt = self._find_next_vine(h.position)
+                    assigned_vines = {hh.assigned_vine for hh in self.humans}
+                    
+                    nxt = self._find_next_vine(cur_v.position, exclude_vines=assigned_vines)
+
+                    if nxt is None:
+                        nxt = self._find_next_vine(from_pos=cur_v.position)
+
                     if nxt is not None:
                         h.assigned_vine = nxt
-                        # optional: snap them to the new vine visually
                         h.position = self.vines[nxt].position.copy()
         
         # 2) Apply new decisions for humans that are free
@@ -662,7 +671,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         
         # Collection point (gold)
         cp = world_to_screen(self.collection_point)
-        pygame.draw.circle(self._screen, (255, 215, 0), cp, 10)
+        pygame.draw.rect(self._screen, (255, 215, 0), (cp[0]-10, cp[1]-10, 20, 20))
         
         # Charging point (Purple)
         chp = world_to_screen(self.charging_point)
@@ -733,8 +742,8 @@ def test_environment():
         render_mode="human",
         topology_mode="row",
         num_humans=3,
-        num_drones=1,
-        max_boxes_per_vine=1,
+        num_drones=2,
+        max_boxes_per_vine=0.1,
         max_backlog=5,
         max_steps=10000,
         dt=1.0,
