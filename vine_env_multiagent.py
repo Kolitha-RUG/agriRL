@@ -121,7 +121,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         render_mode: str = "terminal",
         topology_mode: str = "row",
         num_humans: int = 2,
-        num_drones: int = 1,
+        num_drones: int = 2,
         max_boxes_per_vine: int = 10,
         max_backlog: int = 10,
         max_steps: int = 2000,
