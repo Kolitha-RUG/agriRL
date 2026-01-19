@@ -1,109 +1,58 @@
-import os
 import ray
-from ray import tune
-from ray.tune.registry import register_env
-from ray.rllib.policy.policy import PolicySpec
 from ray.rllib.algorithms.ppo import PPOConfig
-
 from vine_env_multiagent import MultiAgentVineEnv
 
+ray.init(ignore_reinit_error=True)
 
-def env_creator(env_config):
-    return MultiAgentVineEnv(**env_config)
+def policy_mapping_fn(agent_id, episode, **kwargs):
+    return "shared_policy"
 
 
-def main():
-    ray.init(ignore_reinit_error=True)
-
-    ENV_NAME = "MultiAgentVineEnv-v0"
-    register_env(ENV_NAME, env_creator)
-
-    env_config = dict(
-        render_mode="terminal",
-        topology_mode="row",
-        num_humans=2,
-        num_drones=1,
-        max_boxes_per_vine=1,
-        max_backlog=5,
-        max_steps=2000,
-        dt=1.0,
-        harvest_time=5.0,
-        human_speed=0.5,
-        drone_speed=1.0,
-        vineyard_file="data/Vinha_Maria_Teresa_RL.xlsx",
-        reward_delivery=1.0,
-        reward_backlog_penalty=0.5,
-        reward_fatigue_penalty=0.5,
+config = (
+    PPOConfig()
+    # --- ENV ---
+    .environment(
+        env=MultiAgentVineEnv,
+        env_config={"max_steps": 200},
+        disable_env_checking=True,
     )
 
-    dummy = MultiAgentVineEnv(**env_config)
-    obs_space = dummy.observation_spaces["human_0"]
-    act_space = dummy.action_spaces["human_0"]
-    dummy.close()
-
-    policies = {
-        "shared_policy": PolicySpec(
-            policy_class=None,
-            observation_space=obs_space,
-            action_space=act_space,
-            config={},
-        )
-    }
-
-    def policy_mapping_fn(agent_id, *args, **kwargs):
-        return "shared_policy"
-
-    config = (
-        PPOConfig()
-        .environment(env=ENV_NAME, env_config=env_config)
-        .framework("torch")
-        .env_runners(
-            num_env_runners=2,
-            rollout_fragment_length=200,
-        )
-        .training(
-            gamma=0.99,
-            lr=3e-4,
-            train_batch_size_per_learner=4000,
-            num_epochs=10,              # <-- FIX (was num_sgd_iter)
-            minibatch_size=256,     # keep this
-            clip_param=0.2,
-            entropy_coeff=0.01,
-            vf_clip_param=10.0,
-        )
-        .resources(num_gpus=1,
-                    num_gpus_per_worker=0.5
-                   )
-        .multi_agent(
-            policies=policies,
-            policy_mapping_fn=policy_mapping_fn,
-        )
+    # --- ENV RUNNERS (replaces rollouts) ---
+    .env_runners(
+        num_env_runners=0,   # local sampling only (debug-safe)
     )
 
-    storage_path = os.path.join(os.getcwd(), "rllib_results")  # <-- FIX
-
-    tuner = tune.Tuner(
-        "PPO",
-        param_space=config,
-        run_config=tune.RunConfig(
-            stop={"training_iteration": 10},
-            storage_path=storage_path,   # <-- FIX (was local_dir)
-            checkpoint_config=tune.CheckpointConfig(
-                checkpoint_frequency=10,
-                checkpoint_at_end=True,
-            ),
-            verbose=1,
-        ),
+    # --- TRAINING ---
+    .training(
+        gamma=0.99,
+        lr=3e-4,
+        train_batch_size_per_learner=2000,
+        minibatch_size=256,
+        num_epochs=5,
     )
 
-    results = tuner.fit()
+    # --- MULTI-AGENT (MANDATORY) ---
+    .multi_agent(
+        policies={"shared_policy"},
+        policy_mapping_fn=policy_mapping_fn,
+        count_steps_by="agent_steps",
+    )
 
-    best = results.get_best_result(metric="episode_reward_mean", mode="max")
-    print("Best mean reward:", best.metrics.get("episode_reward_mean"))
-    print("Best checkpoint:", best.checkpoint)
+    # --- FRAMEWORK ---
+    .framework("torch")
 
-    ray.shutdown()
+    # --- DEBUGGING ---
+    .debugging(log_level="INFO")
+)
 
+algo = config.build()
 
-if __name__ == "__main__":
-    main()
+for i in range(5):
+    result = algo.train()
+    print(
+        f"\n Iter {i} | "
+        f"episode_reward_mean = {result['sampler_results']['episode_return_mean']} \n"
+    )
+
+algo.stop()
+ray.shutdown()
