@@ -11,15 +11,13 @@ from ray.rllib.env.multi_agent_env import MultiAgentEnv
 ACTION_HARVEST = 0
 ACTION_TRANSPORT = 1
 ACTION_ENQUEUE = 2
-
+ACTION_REST = 3
 # === Drone status ===
 DRONE_IDLE = 0
 DRONE_GO_TO_VINE = 1
 DRONE_DELIVER = 2
 DRONE_GO_TO_CHARGE = 3
 DRONE_CHARGE = 4
-
-
 
 def compute_num_vines(topology_mode: str, vineyard_file: str) -> int:
     """Compute number of vines based on topology mode."""
@@ -100,7 +98,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         - 0: HARVEST - Harvest a box from assigned vine
         - 1: TRANSPORT - Transport held box to collection point
         - 2: ENQUEUE - Queue held box for drone pickup
-        
+        - 3: REST - Take a rest to reduce fatigue
     Observations (per agent):
         Each agent receives a personalized observation including:
         - All vine positions and states (shared)
@@ -156,7 +154,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         # Everything else stays the same from your original __init__
         self.num_vines = compute_num_vines(self.topology_mode, self.vineyard_file)
-        self.num_actions = 3
+        self.num_actions = 4
         self.num_drone_status = 5
 
         self.possible_agents = [f"human_{i}" for i in range(self.num_humans)]
@@ -387,10 +385,17 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 continue
             
             # Get action from action_dict (default to harvest if not provided)
+            # a = action_dict.get(agent_id, ACTION_HARVEST)
+            # h.current_action = a
+
+            vine = self.vines[h.assigned_vine]
+            has_work = (vine.boxes_remaining > 0 or vine.queued_boxes > 0 or h.has_box)
+            if not has_work:
+                continue
+            
             a = action_dict.get(agent_id, ACTION_HARVEST)
             h.current_action = a
-            vine = self.vines[h.assigned_vine]
-            
+
             if a == ACTION_HARVEST:
                 if (not h.has_box) and vine.boxes_remaining > 0:
                     ok = vine.harvest_box()
@@ -411,6 +416,11 @@ class MultiAgentVineEnv(MultiAgentEnv):
                     travel_time = dist / max(self.human_speed, 1e-6)
                     h.busy = True
                     h.time_left = travel_time
+
+            elif a == ACTION_REST:
+                h.busy = True
+                h.time_left = 5.0  # Fixed rest time
+                h.fatigue = float(np.clip(h.fatigue - 0.05, 0.0, 1.0))
         
         # 3) Progress drone timers
         for d in self.drones:
@@ -641,6 +651,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         if h.has_box and vine.queued_boxes >= self.max_backlog:
             mask[ACTION_ENQUEUE] = 0.0
 
+        mask[ACTION_REST] = 1.0  # always valid
         return {"obs": np.clip(obs, 0.0, 1.0), "action_mask": mask}
 
 
@@ -737,7 +748,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         # Humans stats
         for i, h in enumerate(self.humans):
-            action_name = ["HARVEST", "TRANSPORT", "ENQUEUE"][h.current_action]
+            action_name = ["HARVEST", "TRANSPORT", "ENQUEUE", "REST"][h.current_action]
             stats = f"H{i}: {action_name} | Fatigue: {h.fatigue:.2f} | Delivered: {h.delivered_count}"
             text_surf = font.render(stats, True, TEXT_COLOR)
             self._screen.blit(text_surf, (SCREEN_W - 380, line_y))
@@ -760,19 +771,14 @@ class MultiAgentVineEnv(MultiAgentEnv):
             pygame.quit()
             self._pygame_initialized = False
 
-
-# ============================================================================
-# Training Example
-# ============================================================================
-
 def test_environment():
     """Test the Multi-Agent Vine Environment."""
     env = MultiAgentVineEnv(
         render_mode="human",
         topology_mode="row",
-        num_humans=3,
+        num_humans=10,
         num_drones=2,
-        max_boxes_per_vine=0.1,
+        max_boxes_per_vine=0.01,
         max_backlog=5,
         max_steps=10000,
         dt=1.0,

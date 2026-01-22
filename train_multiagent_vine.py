@@ -27,7 +27,7 @@ if __name__ == "__main__":
                 "topology_mode": "row",
                 "num_humans": 2,
                 "num_drones": 2,
-                "max_boxes_per_vine": 0.1,
+                "max_boxes_per_vine": 0.01,
                 "max_steps": 1000,
             },
         )
