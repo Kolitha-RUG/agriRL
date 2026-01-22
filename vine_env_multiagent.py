@@ -182,7 +182,11 @@ class MultiAgentVineEnv(MultiAgentEnv):
         )
 
         self.observation_spaces = {
-            agent_id: spaces.Box(low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32)
+            agent_id: spaces.Dict({
+                                "obs": spaces.Box(low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32),
+                                "action_mask": spaces.Box(low=0.0, high=1.0, shape=(self.num_actions,), dtype=np.float32),
+                            })
+
             for agent_id in self.possible_agents
         }
         self.action_spaces = {
@@ -190,7 +194,11 @@ class MultiAgentVineEnv(MultiAgentEnv):
             for agent_id in self.possible_agents
         }
 
-        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32)
+        self.observation_space = spaces.Dict({
+                                        "obs": spaces.Box(low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32),
+                                        "action_mask": spaces.Box(low=0.0, high=1.0, shape=(self.num_actions,), dtype=np.float32),
+                                    })
+
         self.action_space = spaces.Discrete(self.num_actions)
 
         # init state vars (unchanged)
@@ -505,7 +513,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         no_carry = all(not h.has_box for h in self.humans) and all(not d.has_box for d in self.drones)
         all_idle = all(not h.busy for h in self.humans) and all(not d.busy for d in self.drones)
         
-        terminated = bool(all_harvested and no_queue and no_carry and all_idle)
+        terminated = bool(all_harvested and no_queue and no_carry)
         truncated = bool(self.steps >= self.max_steps)
         
         # Build termination/truncation dicts
@@ -613,7 +621,28 @@ class MultiAgentVineEnv(MultiAgentEnv):
             obs.append(d.battery / 100.0)
 
         obs = np.array(obs, dtype=np.float32)
-        return np.clip(obs, 0.0, 1.0)
+        mask = np.ones(self.num_actions, dtype=np.float32)
+
+        vine = self.vines[h.assigned_vine]
+        # invalid if already holding a box
+        if h.has_box:
+            mask[ACTION_HARVEST] = 0.0
+        else:
+            # invalid if no boxes at vine
+            if vine.boxes_remaining <= 0:
+                mask[ACTION_HARVEST] = 0.0
+
+        # invalid if no box
+        if not h.has_box:
+            mask[ACTION_TRANSPORT] = 0.0
+            mask[ACTION_ENQUEUE] = 0.0
+
+        # invalid if queue full
+        if h.has_box and vine.queued_boxes >= self.max_backlog:
+            mask[ACTION_ENQUEUE] = 0.0
+
+        return {"obs": np.clip(obs, 0.0, 1.0), "action_mask": mask}
+
 
     def render(self):
         """Render the environment."""
