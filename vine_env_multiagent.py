@@ -40,7 +40,7 @@ def one_hot(idx: int, size: int) -> np.ndarray:
 class Vine:
     """Represents a vine or row of vines in the vineyard."""
     
-    def __init__(self, position: Tuple[float, float], max_boxes: int):
+    def __init__(self, position: Tuple[float, float, float], max_boxes: int):
         self.position = np.array(position, dtype=np.float32)
         self.total_boxes = int(max_boxes)
         self.boxes_remaining = int(max_boxes)
@@ -57,7 +57,7 @@ class Vine:
 class Human:
     """Represents a human worker agent."""
     
-    def __init__(self, position: Tuple[float, float], assigned_vine: int):
+    def __init__(self, position: Tuple[float, float, float], assigned_vine: int):
         self.position = np.array(position, dtype=np.float32)
         self.assigned_vine = int(assigned_vine)
         self.fatigue = 0.0
@@ -131,6 +131,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
         reward_delivery: float = 1.0,
         reward_backlog_penalty: float = 0.5,
         reward_fatigue_penalty: float = 0.5,
+        reward_harvest: float = 0.05,
+        reward_enqueue: float = 0.10,
+        reward_drone_credit: float = 1.0,
     ):
         super().__init__()
         
@@ -150,7 +153,10 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         self.reward_delivery = float(reward_delivery)
         self.reward_backlog_penalty = float(reward_backlog_penalty)
-        self.reward_fatigue_penalty = float(reward_fatigue_penalty)
+        self.reward_fatigue_penalty = float(reward_fatigue_penalty) 
+        self.reward_harvest = float(reward_harvest)
+        self.reward_enqueue = float(reward_enqueue)
+        self.reward_drone_credit = float(reward_drone_credit)
 
         # Everything else stays the same from your original __init__
         self.num_vines = compute_num_vines(self.topology_mode, self.vineyard_file)
@@ -161,19 +167,19 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.agents = self.possible_agents.copy()
 
         self.obs_dim = (
-            self.num_vines * 2              # vine positions
-            + 2                             # collection point
-            + 2                             # charging point  <-- ADD THIS
-            + self.num_vines                # boxes_remaining
+            # self.num_vines * 3              # vine positions
+            # + 3                             # collection point
+            # + 3                             # charging point
+            self.num_vines                  # boxes_remaining
             + self.num_vines                # queued_boxes
-            + 2                             # own position
+            + 3                             # own position
             + 1                             # fatigue
             + self.num_actions              # current action one-hot
             + 1                             # own has_box
             + self.num_vines                # assigned_vine one-hot
-            + (self.num_humans - 1) * 2     # other humans positions
+            + (self.num_humans - 1) * 3     # other humans positions
             + (self.num_humans - 1)         # other humans has_box
-            + self.num_drones * 2           # drone positions
+            + self.num_drones * 3           # drone positions
             + self.num_drones * self.num_drone_status  # drone status one-hot
             + self.num_drones               # drone has_box
             + self.num_drones               # drone battery
@@ -203,11 +209,12 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.vines = []
         self.humans = []
         self.drones = []
-        self.collection_point = np.array([0.5, 0.5], dtype=np.float32)
-        self.charging_point = np.array([0.0, 0.0], dtype=np.float32) # Will be updated in reset
-        self.field_size = np.array([1.0, 1.0], dtype=np.float32)
+        self.collection_point = np.array([0.5, 0.5, 0.0], dtype=np.float32)
+        self.charging_point = np.array([0.0, 0.0, 0.0], dtype=np.float32) # Will be updated in reset
+        self.field_size = np.array([1.0, 1.0, 1.0], dtype=np.float32)
         self.x_min = 0.0
         self.y_min = 0.0
+        self.z_min = 0.0
         self.steps = 0
         self.delivered = 0
 
@@ -229,10 +236,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
         """Build vines in full topology mode (one vine per data point)."""
         vines = []
         for _, r in df.iterrows():
-            v = Vine(position=(r.x, r.y), max_boxes=self.max_boxes_per_vine)
+            v = Vine(position=(r.x, r.y, r.z), max_boxes=self.max_boxes_per_vine)
             v.line = r.line
             v.lot = r.lot
-            v.z = r.z
             vines.append(v)
         return vines
 
@@ -247,9 +253,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
             z_mean = g["z"].mean()
             total_boxes = len(g) * self.max_boxes_per_vine
             
-            v = Vine(position=(x_mean, y_mean), max_boxes=total_boxes)
+            v = Vine(position=(x_mean, y_mean, z_mean), max_boxes=total_boxes)
             v.lot = lot_id
-            v.z = z_mean
             v.n_vines = len(g)
             vines.append(v)
             
@@ -290,13 +295,19 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # Calculate field dimensions
         xs = np.array([v.position[0] for v in self.vines])
         ys = np.array([v.position[1] for v in self.vines])
+        zs = np.array([v.position[2] for v in self.vines])
         self.x_min = xs.min()
         self.y_min = ys.min()
-        self.field_size = np.array([xs.max() - self.x_min, ys.max() - self.y_min], dtype=np.float32)
+        self.z_min = zs.min()
+        self.field_size = np.array([
+            xs.max() - self.x_min, 
+            ys.max() - self.y_min,
+            zs.max() - self.z_min
+        ], dtype=np.float32)
         
         # Collection point at right edge, center height
-        self.collection_point = np.array([xs.max(), np.mean(ys)], dtype=np.float32)
-        self.charging_point = np.array([self.x_min, self.y_min], dtype=np.float32)
+        self.collection_point = np.array([xs.max(), np.mean(ys), np.mean(zs)], dtype=np.float32)
+        self.charging_point = np.array([self.x_min, self.y_min, np.mean(zs)], dtype=np.float32)
         
         # Initialize counters
         self.steps = 0
@@ -337,7 +348,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         """
         self.steps += 1
         delivered_before = self.delivered
-        
+        print(self.steps)
         # Track individual contributions for reward attribution
         individual_deliveries = [0] * self.num_humans
         
@@ -523,13 +534,13 @@ class MultiAgentVineEnv(MultiAgentEnv):
         no_carry = all(not h.has_box for h in self.humans) and all(not d.has_box for d in self.drones)
         all_idle = all(not h.busy for h in self.humans) and all(not d.busy for d in self.drones)
         
-        terminated = bool(all_harvested and no_queue and no_carry)
+        terminated = bool(all_harvested and no_queue)
         truncated = bool(self.steps >= self.max_steps)
         
         # Build termination/truncation dicts
         terminateds = {agent_id: terminated for agent_id in self.agents}
         terminateds["__all__"] = terminated
-        
+
         truncateds = {agent_id: truncated for agent_id in self.agents}
         truncateds["__all__"] = truncated
         
@@ -552,7 +563,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
         """Normalize a position to [0, 1] range."""
         x = (pos[0] - self.x_min) / max(self.field_size[0], 1e-6)
         y = (pos[1] - self.y_min) / max(self.field_size[1], 1e-6)
-        return np.clip(np.array([x, y], dtype=np.float32), 0.0, 1.0)
+        z = (pos[2] - self.z_min) / max(self.field_size[2], 1e-6)
+        return np.clip(np.array([x, y, z], dtype=np.float32), 0.0, 1.0)
 
     def _get_obs_for_agent(self, agent_idx: int) -> np.ndarray:
         """
@@ -569,14 +581,14 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # === SHARED STATE ===
         
         # Vine positions (normalized)
-        for v in self.vines:
-            obs.extend(self._normalize_position(v.position))
+        # for v in self.vines:
+        #     obs.extend(self._normalize_position(v.position))
         
         # Collection point (normalized)
-        obs.extend(self._normalize_position(self.collection_point))
+        # obs.extend(self._normalize_position(self.collection_point))
         
         # Charging point (normalized)
-        obs.extend(self._normalize_position(self.charging_point))
+        # obs.extend(self._normalize_position(self.charging_point))
         
         # Boxes remaining per vine (normalized)
         max_boxes_actual = max(v.total_boxes for v in self.vines) if self.vines else 1
@@ -780,7 +792,7 @@ def test_environment():
         num_drones=2,
         max_boxes_per_vine=0.01,
         max_backlog=5,
-        max_steps=10000,
+        max_steps=5000,
         dt=1.0,
         harvest_time=5.0,
         human_speed=0.5,
@@ -797,7 +809,8 @@ def test_environment():
             action_dict[agent_id] = env.action_space.sample()
         
         observations, rewards, terminateds, truncateds, infos = env.step(action_dict)
-        done = {**terminateds, **truncateds}
+        # done = {**terminateds}
+        print(truncateds)
         env.render()
 
     env.close()
