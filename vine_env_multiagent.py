@@ -582,6 +582,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 "delivered": self.delivered,
                 "backlog_total": backlog_total,
                 "individual_delivery": individual_deliveries[i],
+                "harvest": harvest_events[i],
+                "enqueue": enqueue_events[i],
+                "drone_credit_delivery": drone_credit_deliveries[i],
             }
             for i, agent_id in enumerate(self.agents)
         }
