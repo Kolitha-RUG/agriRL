@@ -190,24 +190,19 @@ class MultiAgentVineEnv(MultiAgentEnv):
             + self.num_drones               # drone has_box
             + self.num_drones               # drone battery
         )
+        # Flat obs: [obs_vector, action_mask]
+        self.flat_obs_dim = self.obs_dim + self.num_actions
 
         self.observation_spaces = {
-            agent_id: spaces.Dict({
-                                "obs": spaces.Box(low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32),
-                                "action_mask": spaces.Box(low=0.0, high=1.0, shape=(self.num_actions,), dtype=np.float32),
-                            })
-
+            agent_id: spaces.Box(low=0.0, high=1.0, shape=(self.flat_obs_dim,), dtype=np.float32)
             for agent_id in self.possible_agents
         }
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(self.flat_obs_dim,), dtype=np.float32)
+
         self.action_spaces = {
             agent_id: spaces.Discrete(self.num_actions)
             for agent_id in self.possible_agents
         }
-
-        self.observation_space = spaces.Dict({
-                                        "obs": spaces.Box(low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32),
-                                        "action_mask": spaces.Box(low=0.0, high=1.0, shape=(self.num_actions,), dtype=np.float32),
-                                    })
 
         self.action_space = spaces.Discrete(self.num_actions)
 
@@ -694,8 +689,12 @@ class MultiAgentVineEnv(MultiAgentEnv):
         if h.has_box and vine.queued_boxes >= self.max_backlog:
             mask[ACTION_ENQUEUE] = 0.0
 
-        mask[ACTION_REST] = 1.0  # always valid
-        return {"obs": np.clip(obs, 0.0, 1.0), "action_mask": mask}
+        mask[ACTION_REST] = 1.0  # always vali
+        obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+        obs = np.clip(obs, 0.0, 1.0).astype(np.float32)
+        mask = mask.astype(np.float32)
+
+        return np.concatenate([obs, mask], axis=0).astype(np.float32)
 
 
     def render(self):

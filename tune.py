@@ -1,10 +1,14 @@
+import os
 import ray
-import gymnasium as gym
+import gym
 import numpy as np
-from ray.rllib.algorithms.ppo import PPOConfig
+
+from ray import tune
+from ray.tune import Tuner, RunConfig
 from ray.tune.registry import register_env
 
-from ray.rllib.policy.policy import PolicySpec  # <-- ADD THIS
+from ray.rllib.algorithms.ppo import PPOConfig
+from ray.rllib.algorithms.callbacks import DefaultCallbacks
 
 from ray.rllib.models import ModelCatalog
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
@@ -15,10 +19,10 @@ import torch
 import torch.nn as nn
 
 from vine_env_multiagent import MultiAgentVineEnv
+import os
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-import numpy as np
-from ray.rllib.algorithms.callbacks import DefaultCallbacks
-
+# ---------- KPI callback ----------
 class VineyardKPI(DefaultCallbacks):
     def on_episode_end(self, *, episode, **kwargs):
         delivered = []
@@ -39,7 +43,6 @@ class VineyardKPI(DefaultCallbacks):
             enqueue.append(info.get("enqueue", 0))
             drone_credit.append(info.get("drone_credit_delivery", 0))
 
-        # log mean across agents (stable + easy to interpret)
         episode.custom_metrics["delivered_mean_agents"] = float(np.mean(delivered)) if delivered else 0.0
         episode.custom_metrics["backlog_mean_agents"] = float(np.mean(backlog)) if backlog else 0.0
         episode.custom_metrics["manual_delivery_mean_agents"] = float(np.mean(individual)) if individual else 0.0
@@ -47,22 +50,20 @@ class VineyardKPI(DefaultCallbacks):
         episode.custom_metrics["enqueue_mean_agents"] = float(np.mean(enqueue)) if enqueue else 0.0
         episode.custom_metrics["drone_credit_mean_agents"] = float(np.mean(drone_credit)) if drone_credit else 0.0
 
-        # “business metric”: drone share proxy
         dsum = float(np.sum(drone_credit)) if drone_credit else 0.0
         ddel = float(np.mean(delivered)) if delivered else 0.0
         episode.custom_metrics["drone_share_proxy"] = (dsum / ddel) if ddel > 0 else 0.0
 
 
+# ---------- Action-mask model for FLAT obs: [obs, mask] ----------
 class TorchActionMaskModel(TorchModelV2, nn.Module):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
 
-        # obs_space is Box(flat_obs_dim,)
         self.num_actions = int(action_space.n)
         self.base_obs_dim = int(obs_space.shape[0] - self.num_actions)
 
-        # Build FC net over the base obs only (without mask)
         base_obs_space = gym.spaces.Box(
             low=0.0, high=1.0, shape=(self.base_obs_dim,), dtype=np.float32
         )
@@ -71,7 +72,7 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
         )
 
     def forward(self, input_dict, state, seq_lens):
-        x = input_dict["obs"]  # tensor [B, flat_obs_dim]
+        x = input_dict["obs"]  # [B, base_obs_dim + num_actions]
         obs = x[:, : self.base_obs_dim]
         action_mask = x[:, self.base_obs_dim :]
 
@@ -82,6 +83,7 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
     def value_function(self):
         return self.internal_model.value_function()
 
+
 def env_creator(env_config):
     return MultiAgentVineEnv(**env_config)
 
@@ -91,6 +93,9 @@ def policy_mapping_fn(agent_id, *args, **kwargs):
 
 
 if __name__ == "__main__":
+    # Optional: reduces Windows metrics spam
+    os.environ["RAY_DISABLE_METRICS"] = "1"
+
     ray.init(ignore_reinit_error=True)
 
     register_env("MultiAgentVine", env_creator)
@@ -99,7 +104,7 @@ if __name__ == "__main__":
     env_config = dict(
         render_mode="terminal",
         topology_mode="row",
-        vineyard_file="data/Vinha_Maria_Teresa_RL.xlsx",
+        vineyard_file=os.path.join(PROJECT_DIR, "data", "Vinha_Maria_Teresa_RL.xlsx"),
         num_humans=2,
         num_drones=2,
         max_boxes_per_vine=10,
@@ -111,39 +116,39 @@ if __name__ == "__main__":
         drone_speed=1.0,
     )
 
-    tmp_env = MultiAgentVineEnv(**env_config)
-    obs_space = tmp_env.observation_space
-    act_space = tmp_env.action_space
-    tmp_env.close()
-
     config = (
         PPOConfig()
+        # keep ModelV2 custom_model support
         .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
         .environment(env="MultiAgentVine", env_config=env_config)
         .env_runners(num_env_runners=0)
-        .training(gamma=0.99, lr=3e-4, train_batch_size=4000,
-                model={"custom_model": "torch_action_mask_model",
-                        "fcnet_hiddens":[256,256],
-                        "fcnet_activation":"relu"})
-        .multi_agent(policies=["shared_policy"],
-                    policy_mapping_fn=lambda agent_id, episode, **kw: "shared_policy")
-        .callbacks(VineyardKPI)        
-        .resources(
-            num_gpus=1,  # Set to 1 if you have a GPU
+        .training(
+            gamma=0.99,
+            lr=3e-4,
+            train_batch_size=4000,
+            model={
+                "custom_model": "torch_action_mask_model",
+                "fcnet_hiddens": [256, 256],
+                "fcnet_activation": "relu",
+            },
         )
+        .multi_agent(
+            policies=["shared_policy"],
+            policy_mapping_fn=policy_mapping_fn,
+        )
+        .callbacks(VineyardKPI)
     )
-     # <-- guaranteed folder
-    algo = config.build_algo()
-    
-    print("\n Logdir:", algo.logdir)
-    for i in range(1, 11):
-        result = algo.train()
-        er = result["env_runners"]
-        print(
-            f"{i:03d} return={er.get('episode_return_mean', float('nan')):.3f} "
-            f"len={er.get('episode_len_mean', float('nan')):.1f} "
-            f"episodes={er.get('num_episodes', 0)}"
-        )
 
-    algo.stop()
-    ray.shutdown()
+    tuner = Tuner(
+        "PPO",
+        # IMPORTANT: pass the config object directly (Ray docs do this). :contentReference[oaicite:1]{index=1}
+        param_space=config,
+        run_config=RunConfig(
+            name="vineyard_ppo",
+            storage_path=os.path.join(PROJECT_DIR, "ray_results_vine"),
+            stop={"training_iteration": 10},
+        ),
+    )
+
+    results = tuner.fit()
+    print("Done. TensorBoard logdir: ray_results_vine")
