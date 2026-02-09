@@ -4,6 +4,7 @@ from gymnasium import spaces
 import pandas as pd
 import pygame
 from typing import Dict, List, Optional, Tuple, Any
+from collections import deque
 
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
@@ -40,11 +41,12 @@ def one_hot(idx: int, size: int) -> np.ndarray:
 class Vine:
     """Represents a vine or row of vines in the vineyard."""
     
-    def __init__(self, position: Tuple[float, float, float], max_boxes: int):
+    def __init__(self, position: Tuple[float, float], max_boxes: int):
         self.position = np.array(position, dtype=np.float32)
         self.total_boxes = int(max_boxes)
         self.boxes_remaining = int(max_boxes)
         self.queued_boxes = 0
+        self.queue_contributors = deque() 
 
     def harvest_box(self) -> bool:
         """Remove 1 available box from the vine."""
@@ -57,7 +59,7 @@ class Vine:
 class Human:
     """Represents a human worker agent."""
     
-    def __init__(self, position: Tuple[float, float, float], assigned_vine: int):
+    def __init__(self, position: Tuple[float, float], assigned_vine: int):
         self.position = np.array(position, dtype=np.float32)
         self.assigned_vine = int(assigned_vine)
         self.fatigue = 0.0
@@ -81,6 +83,8 @@ class Drone:
         self.target_vine: Optional[int] = None
         self.delivered_count = 0
         self.battery = 100.0
+        self.last_contributor: Optional[int] = None
+
 
 
 class MultiAgentVineEnv(MultiAgentEnv):
@@ -134,6 +138,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         reward_harvest: float = 0.05,
         reward_enqueue: float = 0.10,
         reward_drone_credit: float = 1.0,
+
     ):
         super().__init__()
         
@@ -153,7 +158,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         self.reward_delivery = float(reward_delivery)
         self.reward_backlog_penalty = float(reward_backlog_penalty)
-        self.reward_fatigue_penalty = float(reward_fatigue_penalty) 
+        self.reward_fatigue_penalty = float(reward_fatigue_penalty)
         self.reward_harvest = float(reward_harvest)
         self.reward_enqueue = float(reward_enqueue)
         self.reward_drone_credit = float(reward_drone_credit)
@@ -165,21 +170,22 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         self.possible_agents = [f"human_{i}" for i in range(self.num_humans)]
         self.agents = self.possible_agents.copy()
+        self.queue_contributors = deque()
 
         self.obs_dim = (
-            # self.num_vines * 3              # vine positions
-            # + 3                             # collection point
-            # + 3                             # charging point
-            self.num_vines                  # boxes_remaining
+            self.num_vines * 2              # vine positions
+            + 2                             # collection point
+            + 2                             # charging point  <-- ADD THIS
+            + self.num_vines                # boxes_remaining
             + self.num_vines                # queued_boxes
-            + 3                             # own position
+            + 2                             # own position
             + 1                             # fatigue
             + self.num_actions              # current action one-hot
             + 1                             # own has_box
             + self.num_vines                # assigned_vine one-hot
-            + (self.num_humans - 1) * 3     # other humans positions
+            + (self.num_humans - 1) * 2     # other humans positions
             + (self.num_humans - 1)         # other humans has_box
-            + self.num_drones * 3           # drone positions
+            + self.num_drones * 2           # drone positions
             + self.num_drones * self.num_drone_status  # drone status one-hot
             + self.num_drones               # drone has_box
             + self.num_drones               # drone battery
@@ -209,12 +215,11 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.vines = []
         self.humans = []
         self.drones = []
-        self.collection_point = np.array([0.5, 0.5, 0.0], dtype=np.float32)
-        self.charging_point = np.array([0.0, 0.0, 0.0], dtype=np.float32) # Will be updated in reset
-        self.field_size = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        self.collection_point = np.array([0.5, 0.5], dtype=np.float32)
+        self.charging_point = np.array([0.0, 0.0], dtype=np.float32) # Will be updated in reset
+        self.field_size = np.array([1.0, 1.0], dtype=np.float32)
         self.x_min = 0.0
         self.y_min = 0.0
-        self.z_min = 0.0
         self.steps = 0
         self.delivered = 0
 
@@ -236,9 +241,10 @@ class MultiAgentVineEnv(MultiAgentEnv):
         """Build vines in full topology mode (one vine per data point)."""
         vines = []
         for _, r in df.iterrows():
-            v = Vine(position=(r.x, r.y, r.z), max_boxes=self.max_boxes_per_vine)
+            v = Vine(position=(r.x, r.y), max_boxes=self.max_boxes_per_vine)
             v.line = r.line
             v.lot = r.lot
+            v.z = r.z
             vines.append(v)
         return vines
 
@@ -253,8 +259,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
             z_mean = g["z"].mean()
             total_boxes = len(g) * self.max_boxes_per_vine
             
-            v = Vine(position=(x_mean, y_mean, z_mean), max_boxes=total_boxes)
+            v = Vine(position=(x_mean, y_mean), max_boxes=total_boxes)
             v.lot = lot_id
+            v.z = z_mean
             v.n_vines = len(g)
             vines.append(v)
             
@@ -295,19 +302,13 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # Calculate field dimensions
         xs = np.array([v.position[0] for v in self.vines])
         ys = np.array([v.position[1] for v in self.vines])
-        zs = np.array([v.position[2] for v in self.vines])
         self.x_min = xs.min()
         self.y_min = ys.min()
-        self.z_min = zs.min()
-        self.field_size = np.array([
-            xs.max() - self.x_min, 
-            ys.max() - self.y_min,
-            zs.max() - self.z_min
-        ], dtype=np.float32)
+        self.field_size = np.array([xs.max() - self.x_min, ys.max() - self.y_min], dtype=np.float32)
         
         # Collection point at right edge, center height
-        self.collection_point = np.array([xs.max(), np.mean(ys), np.mean(zs)], dtype=np.float32)
-        self.charging_point = np.array([self.x_min, self.y_min, np.mean(zs)], dtype=np.float32)
+        self.collection_point = np.array([xs.max(), np.mean(ys)], dtype=np.float32)
+        self.charging_point = np.array([self.x_min, self.y_min], dtype=np.float32)
         
         # Initialize counters
         self.steps = 0
@@ -348,9 +349,13 @@ class MultiAgentVineEnv(MultiAgentEnv):
         """
         self.steps += 1
         delivered_before = self.delivered
-        print(self.steps)
+        # print(self.steps)
         # Track individual contributions for reward attribution
         individual_deliveries = [0] * self.num_humans
+        harvest_events = [0] * self.num_humans
+        enqueue_events = [0] * self.num_humans
+        drone_credit_deliveries = [0] * self.num_humans
+
         
         # 1) Progress ongoing actions (timers) for humans
         for i, h in enumerate(self.humans):
@@ -411,13 +416,19 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 if (not h.has_box) and vine.boxes_remaining > 0:
                     ok = vine.harvest_box()
                     if ok:
+                        harvest_events[i] += 1
                         h.busy = True
                         h.time_left = self.harvest_time
                         h.position = vine.position.copy()
                         
             elif a == ACTION_ENQUEUE:
                 if h.has_box and vine.queued_boxes < self.max_backlog:
+                    
                     vine.queued_boxes += 1
+                    vine.queue_contributors.append(i)
+                    enqueue_events[i] += 1
+                    h.busy = True
+                    h.time_left = self.harvest_time
                     h.has_box = False
                     h.position = vine.position.copy()
                     
@@ -446,6 +457,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
                         d.position = v.position.copy()
                         if v.queued_boxes > 0:
                             v.queued_boxes -= 1
+                            contributor = v.queue_contributors.popleft() if len(v.queue_contributors) > 0 else None
+                            d.last_contributor = contributor
                             d.has_box = True
                             d.status = DRONE_DELIVER
                             dist = float(np.linalg.norm(d.position - self.collection_point))
@@ -462,6 +475,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
                             d.has_box = False
                             self.delivered += 1
                             d.delivered_count += 1
+                            if d.last_contributor is not None:
+                                drone_credit_deliveries[d.last_contributor] += 1
+                            d.last_contributor = None
                         
                         d.status = DRONE_IDLE
                         d.target_vine = None
@@ -526,7 +542,20 @@ class MultiAgentVineEnv(MultiAgentEnv):
             backlog_penalty = self.reward_backlog_penalty * backlog_total / self.num_humans
             fatigue_penalty = self.reward_fatigue_penalty * h.fatigue
             
-            rewards[agent_id] = team_reward + individual_bonus - backlog_penalty - fatigue_penalty
+            harvest_reward = self.reward_harvest * harvest_events[i]
+            enqueue_reward = self.reward_enqueue * enqueue_events[i]
+            drone_credit_reward = self.reward_drone_credit * drone_credit_deliveries[i]
+
+            rewards[agent_id] = (
+                team_reward
+                + individual_bonus
+                + harvest_reward
+                + enqueue_reward
+                + drone_credit_reward
+                - backlog_penalty
+                - fatigue_penalty
+            )
+
         
         # Check termination conditions
         all_harvested = all(v.boxes_remaining == 0 for v in self.vines)
@@ -563,8 +592,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         """Normalize a position to [0, 1] range."""
         x = (pos[0] - self.x_min) / max(self.field_size[0], 1e-6)
         y = (pos[1] - self.y_min) / max(self.field_size[1], 1e-6)
-        z = (pos[2] - self.z_min) / max(self.field_size[2], 1e-6)
-        return np.clip(np.array([x, y, z], dtype=np.float32), 0.0, 1.0)
+        return np.clip(np.array([x, y], dtype=np.float32), 0.0, 1.0)
 
     def _get_obs_for_agent(self, agent_idx: int) -> np.ndarray:
         """
@@ -581,14 +609,14 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # === SHARED STATE ===
         
         # Vine positions (normalized)
-        # for v in self.vines:
-        #     obs.extend(self._normalize_position(v.position))
+        for v in self.vines:
+            obs.extend(self._normalize_position(v.position))
         
         # Collection point (normalized)
-        # obs.extend(self._normalize_position(self.collection_point))
+        obs.extend(self._normalize_position(self.collection_point))
         
         # Charging point (normalized)
-        # obs.extend(self._normalize_position(self.charging_point))
+        obs.extend(self._normalize_position(self.charging_point))
         
         # Boxes remaining per vine (normalized)
         max_boxes_actual = max(v.total_boxes for v in self.vines) if self.vines else 1
@@ -809,8 +837,8 @@ def test_environment():
             action_dict[agent_id] = env.action_space.sample()
         
         observations, rewards, terminateds, truncateds, infos = env.step(action_dict)
-        # done = {**terminateds}
-        print(truncateds)
+        done = {**terminateds}
+        # print(truncateds)
         env.render()
 
     env.close()
