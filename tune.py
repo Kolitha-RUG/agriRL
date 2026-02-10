@@ -22,7 +22,6 @@ from vine_env_multiagent import MultiAgentVineEnv
 import os
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ---------- KPI callback ----------
 class VineyardKPI(DefaultCallbacks):
     def on_episode_end(self, *, episode, **kwargs):
         delivered = []
@@ -55,7 +54,6 @@ class VineyardKPI(DefaultCallbacks):
         episode.custom_metrics["drone_share_proxy"] = (dsum / ddel) if ddel > 0 else 0.0
 
 
-# ---------- Action-mask model for FLAT obs: [obs, mask] ----------
 class TorchActionMaskModel(TorchModelV2, nn.Module):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
@@ -93,7 +91,6 @@ def policy_mapping_fn(agent_id, *args, **kwargs):
 
 
 if __name__ == "__main__":
-    # Optional: reduces Windows metrics spam
     os.environ["RAY_DISABLE_METRICS"] = "1"
 
     ray.init(ignore_reinit_error=True)
@@ -105,8 +102,8 @@ if __name__ == "__main__":
         render_mode="terminal",
         topology_mode="row",
         vineyard_file=os.path.join(PROJECT_DIR, "data", "Vinha_Maria_Teresa_RL.xlsx"),
-        num_humans=2,
-        num_drones=2,
+        num_humans=5,
+        num_drones=1,
         max_boxes_per_vine=10,
         max_steps=1000,
         max_backlog=10,
@@ -118,7 +115,7 @@ if __name__ == "__main__":
 
     config = (
         PPOConfig()
-        # keep ModelV2 custom_model support
+
         .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
         .environment(env="MultiAgentVine", env_config=env_config)
         .env_runners(num_env_runners=0)
@@ -137,16 +134,18 @@ if __name__ == "__main__":
             policy_mapping_fn=policy_mapping_fn,
         )
         .callbacks(VineyardKPI)
+        .resources(
+            num_gpus=1,
+        )
     )
 
     tuner = Tuner(
         "PPO",
-        # IMPORTANT: pass the config object directly (Ray docs do this). :contentReference[oaicite:1]{index=1}
         param_space=config,
         run_config=RunConfig(
             name="vineyard_ppo",
             storage_path=os.path.join(PROJECT_DIR, "ray_results_vine"),
-            stop={"training_iteration": 10},
+            stop={"training_iteration": 50},
         ),
     )
 
