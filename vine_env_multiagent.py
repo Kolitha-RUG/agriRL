@@ -161,9 +161,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.drone_speed = float(drone_speed)
         self.vineyard_file = vineyard_file
 
-        self.drone_flight_time_full = 16.0 * 60.0   # seconds (960)
+        self.drone_flight_time_full = 16.0  # seconds (960)
         self.drone_batt_drain_rate = 100.0 / self.drone_flight_time_full  # % per second
-        self.drone_charge_time_full = 16.0 * 60.0  # or use real charge time if you have it
+        self.drone_charge_time_full = 16.0  # or use real charge time if you have it
         self.drone_batt_charge_rate = 100.0 / self.drone_charge_time_full  # % per second
 
         self.reward_delivery = float(reward_delivery)
@@ -836,7 +836,7 @@ def test_environment():
         render_mode="human",
         topology_mode="row",
         num_humans=10,
-        num_drones=2,
+        num_drones=1,
         max_boxes_per_vine=0.01,
         max_backlog=5,
         max_steps=5000,
