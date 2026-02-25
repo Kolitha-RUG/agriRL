@@ -24,34 +24,22 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class VineyardKPI(DefaultCallbacks):
     def on_episode_end(self, *, episode, **kwargs):
-        delivered = []
-        backlog = []
-        individual = []
-        harvest = []
-        enqueue = []
-        drone_credit = []
-
+        # Grab one agent's info at the end (all agents carry the same episode_summary dict)
+        summary = None
         for agent_id in episode.get_agents():
             info = episode.last_info_for(agent_id)
-            if not isinstance(info, dict):
-                continue
-            delivered.append(info.get("delivered", 0))
-            backlog.append(info.get("backlog_total", 0))
-            individual.append(info.get("individual_delivery", 0))
-            harvest.append(info.get("harvest", 0))
-            enqueue.append(info.get("enqueue", 0))
-            drone_credit.append(info.get("drone_credit_delivery", 0))
+            if isinstance(info, dict):
+                summary = info.get("episode_summary", None)
+                if summary:  # non-empty dict
+                    break
 
-        episode.custom_metrics["delivered_mean_agents"] = float(np.mean(delivered)) if delivered else 0.0
-        episode.custom_metrics["backlog_mean_agents"] = float(np.mean(backlog)) if backlog else 0.0
-        episode.custom_metrics["manual_delivery_mean_agents"] = float(np.mean(individual)) if individual else 0.0
-        episode.custom_metrics["harvest_mean_agents"] = float(np.mean(harvest)) if harvest else 0.0
-        episode.custom_metrics["enqueue_mean_agents"] = float(np.mean(enqueue)) if enqueue else 0.0
-        episode.custom_metrics["drone_credit_mean_agents"] = float(np.mean(drone_credit)) if drone_credit else 0.0
+        if not summary:
+            return
 
-        dsum = float(np.sum(drone_credit)) if drone_credit else 0.0
-        ddel = float(np.mean(delivered)) if delivered else 0.0
-        episode.custom_metrics["drone_share_proxy"] = (dsum / ddel) if ddel > 0 else 0.0
+        # Write each summary field into TensorBoard custom_metrics
+        for k, v in summary.items():
+            # ensure TB-friendly scalars
+            episode.custom_metrics[k] = float(v)
 
 
 class TorchActionMaskModel(TorchModelV2, nn.Module):
@@ -151,3 +139,5 @@ if __name__ == "__main__":
 
     results = tuner.fit()
     print("Done. TensorBoard logdir: ray_results_vine")
+
+#  tensorboard --logdir=ray_results_vine/vineyard_ppo
