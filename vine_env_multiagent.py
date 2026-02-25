@@ -129,6 +129,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
         max_steps: int = 2000,
         dt: float = 1.0,
         harvest_time: float = 10.0,
+        enqueue_time: float = 1.0,
+        rest_time: float = 5.0,
         human_speed: float = 0.5,
         drone_speed: float = 1.0,
         vineyard_file: str = "data/Vinha_Maria_Teresa_RL.xlsx",
@@ -138,6 +140,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         reward_harvest: float = 0.05,
         reward_enqueue: float = 0.10,
         reward_drone_credit: float = 1.0,
+
 
     ):
         super().__init__()
@@ -152,9 +155,16 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.max_steps = max_steps
         self.dt = float(dt)
         self.harvest_time = float(harvest_time)
+        self.enqueue_time = float(enqueue_time)
+        self.rest_time = float(rest_time)
         self.human_speed = float(human_speed)
         self.drone_speed = float(drone_speed)
         self.vineyard_file = vineyard_file
+
+        self.drone_flight_time_full = 16.0 * 60.0   # seconds (960)
+        self.drone_batt_drain_rate = 100.0 / self.drone_flight_time_full  # % per second
+        self.drone_charge_time_full = 16.0 * 60.0  # or use real charge time if you have it
+        self.drone_batt_charge_rate = 100.0 / self.drone_charge_time_full  # % per second
 
         self.reward_delivery = float(reward_delivery)
         self.reward_backlog_penalty = float(reward_backlog_penalty)
@@ -350,13 +360,19 @@ class MultiAgentVineEnv(MultiAgentEnv):
         harvest_events = [0] * self.num_humans
         enqueue_events = [0] * self.num_humans
         drone_credit_deliveries = [0] * self.num_humans
-
+        fatigue_before = [h.fatigue for h in self.humans]
         
         # 1) Progress ongoing actions (timers) for humans
         for i, h in enumerate(self.humans):
             if h.busy:
                 h.time_left -= self.dt
-                
+                # Fatigue accumulates/recover while action is being executed
+                if h.current_action == ACTION_HARVEST:
+                    h.fatigue = float(np.clip(h.fatigue + 0.002 * self.dt, 0.0, 1.0))
+                elif h.current_action == ACTION_TRANSPORT:
+                    h.fatigue = float(np.clip(h.fatigue + 0.004 * self.dt, 0.0, 1.0))
+                elif h.current_action == ACTION_REST:
+                    h.fatigue = float(np.clip(h.fatigue - 0.006 * self.dt, 0.0, 1.0))
                 
                 if h.time_left <= 0.0:
                     h.busy = False
@@ -364,11 +380,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
                     
                     if h.current_action == ACTION_HARVEST:
                         h.has_box = True
-                        h.fatigue = float(np.clip(h.fatigue - 0.001 * self.dt, 0.0, 1.0))
                     elif h.current_action == ACTION_TRANSPORT:
                         if h.has_box:
                             h.has_box = False
-                            h.fatigue = float(np.clip(h.fatigue + 0.02 * self.dt, 0.0, 1.0))
                             self.delivered += 1
                             h.delivered_count += 1
                             individual_deliveries[i] = 1
@@ -394,18 +408,17 @@ class MultiAgentVineEnv(MultiAgentEnv):
             
             if h.busy:
                 continue
-            
-            # Get action from action_dict (default to harvest if not provided)
-            # a = action_dict.get(agent_id, ACTION_HARVEST)
-            # h.current_action = a
-
+                        
             vine = self.vines[h.assigned_vine]
-            has_work = (vine.boxes_remaining > 0 or vine.queued_boxes > 0 or h.has_box)
-            if not has_work:
-                continue
-            
+
             a = action_dict.get(agent_id, ACTION_HARVEST)
             h.current_action = a
+
+            # Allow REST regardless of local work.
+            if a != ACTION_REST:
+                has_work = (vine.boxes_remaining > 0 or h.has_box)
+                if not has_work:
+                    continue
 
             if a == ACTION_HARVEST:
                 if (not h.has_box) and vine.boxes_remaining > 0:
@@ -423,7 +436,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
                     vine.queue_contributors.append(i)
                     enqueue_events[i] += 1
                     h.busy = True
-                    h.time_left = self.harvest_time
+                    h.time_left = self.enqueue_time
                     h.has_box = False
                     h.position = vine.position.copy()
                     
@@ -436,13 +449,16 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
             elif a == ACTION_REST:
                 h.busy = True
-                h.time_left = 5.0  # Fixed rest time
-                h.fatigue = float(np.clip(h.fatigue - 0.05, 0.0, 1.0))
-        
+                h.time_left = self.rest_time # Fixed rest time
+        fatigue_after = [h.fatigue for h in self.humans]
+        fatigue_increase = [max(0.0, fa - fb) for fa, fb in zip(fatigue_after, fatigue_before)]
         # 3) Progress drone timers
         for d in self.drones:
             if d.busy:
                 d.time_left -= self.dt
+                # Drain battery during flight (time-based)
+                if d.status in (DRONE_GO_TO_VINE, DRONE_DELIVER, DRONE_GO_TO_CHARGE):
+                    d.battery = max(0.0, d.battery - self.drone_batt_drain_rate * self.dt)
                 if d.time_left <= 0.0:
                     d.busy = False
                     d.time_left = 0.0
@@ -465,7 +481,6 @@ class MultiAgentVineEnv(MultiAgentEnv):
                             
                     elif d.status == DRONE_DELIVER:
                         d.position = self.collection_point.copy()
-                        d.battery = max(0.0, d.battery - 10.0) # Reduce battery on buffer transport
                         if d.has_box:
                             d.has_box = False
                             self.delivered += 1
@@ -479,7 +494,6 @@ class MultiAgentVineEnv(MultiAgentEnv):
                     
                     elif d.status == DRONE_GO_TO_CHARGE:
                         d.position = self.charging_point.copy()
-                        d.battery = max(0.0, d.battery - 10.0) # Cost to get to charger
                         d.status = DRONE_CHARGE
                         # Wait time for charging? Let's say it takes 1 step to start charging, 
                         # or we can just apply charging in the IDLE/CHARGE logic below.
@@ -491,7 +505,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         for d in self.drones:
             if d.status == DRONE_CHARGE and not d.busy:
                 # Charge up
-                d.battery += 1.0 # Charge speed
+                d.battery = min(100.0, d.battery + self.drone_batt_charge_rate * self.dt) # Charge speed
                 if d.battery >= 100.0:
                     d.battery = 100.0
                     d.status = DRONE_IDLE
@@ -515,48 +529,49 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 if candidates:
                     dists = [np.linalg.norm(self.vines[idx].position - d.position) for idx in candidates]
                     target = candidates[int(np.argmin(dists))]
+
+                    # --- NEW: time-based battery feasibility check (go-to-vine + deliver-to-CP) ---
+                    dist_to_vine = float(np.linalg.norm(self.vines[target].position - d.position))
+                    t_go = dist_to_vine / max(self.drone_speed, 1e-6)
+
+                    dist_to_cp = float(np.linalg.norm(self.vines[target].position - self.collection_point))
+                    t_deliver = dist_to_cp / max(self.drone_speed, 1e-6)
+
+                    battery_needed = self.drone_batt_drain_rate * (t_go + t_deliver)  # % needed
+                    safety_margin = 5.0  # % (tune)
+
+                    if d.battery <= battery_needed + safety_margin:
+                        # Not enough battery to complete safely -> go charge instead
+                        d.status = DRONE_GO_TO_CHARGE
+                        dist = float(np.linalg.norm(d.position - self.charging_point))
+                        d.busy = True
+                        d.time_left = dist / max(self.drone_speed, 1e-6)
+                        continue
+                    # --- END NEW ---
+
+                    # Proceed with mission
                     d.target_vine = target
                     d.status = DRONE_GO_TO_VINE
-                    dist = float(np.linalg.norm(self.vines[target].position - d.position))
                     d.busy = True
-                    d.time_left = dist / max(self.drone_speed, 1e-6)
-        
+                    d.time_left = t_go
+                        
+
+
         # Calculate rewards
         delivered_delta = self.delivered - delivered_before
         backlog_total = sum(v.queued_boxes for v in self.vines)
-        
-        # Build per-agent rewards
-        rewards = {}
-        for i, agent_id in enumerate(self.agents):
-            h = self.humans[i]
-            # Base reward from team deliveries (shared)
-            team_reward = self.reward_delivery * delivered_delta / self.num_humans
-            # Bonus for individual direct deliveries
-            individual_bonus = self.reward_delivery * individual_deliveries[i]
-            # Penalties
-            backlog_penalty = self.reward_backlog_penalty * backlog_total / self.num_humans
-            fatigue_penalty = self.reward_fatigue_penalty * h.fatigue
-            
-            harvest_reward = self.reward_harvest * harvest_events[i]
-            enqueue_reward = self.reward_enqueue * enqueue_events[i]
-            drone_credit_reward = self.reward_drone_credit * drone_credit_deliveries[i]
+        fatigue_total = sum(fatigue_increase)  # Σ [Δf]+
+        shared_reward = (
+                        self.reward_delivery * delivered_delta
+                        - self.reward_fatigue_penalty * fatigue_total
+                        - self.reward_backlog_penalty * backlog_total
+                    )
 
-            rewards[agent_id] = (
-                team_reward
-                + individual_bonus
-                + harvest_reward
-                + enqueue_reward
-                + drone_credit_reward
-                - backlog_penalty
-                - fatigue_penalty
-            )
-
+        rewards = {agent_id: float(shared_reward) for agent_id in self.agents}
         
         # Check termination conditions
         all_harvested = all(v.boxes_remaining == 0 for v in self.vines)
         no_queue = all(v.queued_boxes == 0 for v in self.vines)
-        no_carry = all(not h.has_box for h in self.humans) and all(not d.has_box for d in self.drones)
-        all_idle = all(not h.busy for h in self.humans) and all(not d.busy for d in self.drones)
         
         terminated = bool(all_harvested and no_queue)
         truncated = bool(self.steps >= self.max_steps)
@@ -575,6 +590,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
         infos = {
             agent_id: {
                 "delivered": self.delivered,
+                "delivered_delta": delivered_delta,
+                "fatigue_total_increase": fatigue_total,
                 "backlog_total": backlog_total,
                 "individual_delivery": individual_deliveries[i],
                 "harvest": harvest_events[i],
