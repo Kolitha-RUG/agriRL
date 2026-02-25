@@ -318,7 +318,15 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # Initialize counters
         self.steps = 0
         self.delivered = 0
-        
+        # --- episode counters (for TensorBoard) ---
+        self.ep_human_action_steps = np.zeros((self.num_humans, self.num_actions), dtype=np.int32)
+        self.ep_human_action_seconds = np.zeros((self.num_humans, self.num_actions), dtype=np.float32)
+
+        self.ep_drone_status_steps = np.zeros((self.num_drones, self.num_drone_status), dtype=np.int32)
+        self.ep_drone_status_seconds = np.zeros((self.num_drones, self.num_drone_status), dtype=np.float32)
+
+        self.ep_fatigue_increase_total = 0.0
+        self.ep_delivered_delta_total = 0
         # Initialize humans at their assigned vines
         self.humans = []
         for h in range(self.num_humans):
@@ -361,7 +369,12 @@ class MultiAgentVineEnv(MultiAgentEnv):
         enqueue_events = [0] * self.num_humans
         drone_credit_deliveries = [0] * self.num_humans
         fatigue_before = [h.fatigue for h in self.humans]
-        
+        # --- count what humans are doing this timestep ---
+        for i, agent_id in enumerate(self.agents):
+            a = action_dict.get(agent_id, ACTION_HARVEST)
+            # count chosen actions (decision-time)
+            self.ep_human_action_steps[i, a] += 1
+            self.ep_human_action_seconds[i, a] += self.dt
         # 1) Progress ongoing actions (timers) for humans
         for i, h in enumerate(self.humans):
             if h.busy:
@@ -555,12 +568,20 @@ class MultiAgentVineEnv(MultiAgentEnv):
                     d.busy = True
                     d.time_left = t_go
                         
+        # --- count drone status time this timestep ---
+        for j, d in enumerate(self.drones):
+            s = int(d.status)
+            self.ep_drone_status_steps[j, s] += 1
+            self.ep_drone_status_seconds[j, s] += self.dt
 
+        self.ep_fatigue_increase_total += float(sum(fatigue_increase))
 
         # Calculate rewards
         delivered_delta = self.delivered - delivered_before
+        self.ep_delivered_delta_total += int(delivered_delta)
+
         backlog_total = sum(v.queued_boxes for v in self.vines)
-        fatigue_total = sum(fatigue_increase)  # Σ [Δf]+
+        fatigue_total = sum(fatigue_increase)
         shared_reward = (
                         self.reward_delivery * delivered_delta
                         - self.reward_fatigue_penalty * fatigue_total
@@ -585,6 +606,45 @@ class MultiAgentVineEnv(MultiAgentEnv):
         
         # Build observations
         observations = {agent_id: self._get_obs_for_agent(i) for i, agent_id in enumerate(self.agents)}
+
+        if terminated or truncated:
+            # aggregate across humans
+            human_steps = self.ep_human_action_steps.sum(axis=0)
+            human_secs = self.ep_human_action_seconds.sum(axis=0)
+
+            # aggregate across drones
+            drone_steps = self.ep_drone_status_steps.sum(axis=0)
+            drone_secs = self.ep_drone_status_seconds.sum(axis=0)
+
+            # Put into a special key so RLlib can pick it up easily in callbacks
+            summary = {
+                "human_steps_harvest": int(human_steps[ACTION_HARVEST]),
+                "human_steps_transport": int(human_steps[ACTION_TRANSPORT]),
+                "human_steps_enqueue": int(human_steps[ACTION_ENQUEUE]),
+                "human_steps_rest": int(human_steps[ACTION_REST]),
+
+                "human_seconds_harvest": float(human_secs[ACTION_HARVEST]),
+                "human_seconds_transport": float(human_secs[ACTION_TRANSPORT]),
+                "human_seconds_enqueue": float(human_secs[ACTION_ENQUEUE]),
+                "human_seconds_rest": float(human_secs[ACTION_REST]),
+
+                "drone_steps_idle": int(drone_steps[DRONE_IDLE]),
+                "drone_steps_go_to_vine": int(drone_steps[DRONE_GO_TO_VINE]),
+                "drone_steps_deliver": int(drone_steps[DRONE_DELIVER]),
+                "drone_steps_go_to_charge": int(drone_steps[DRONE_GO_TO_CHARGE]),
+                "drone_steps_charge": int(drone_steps[DRONE_CHARGE]),
+
+                "drone_seconds_idle": float(drone_secs[DRONE_IDLE]),
+                "drone_seconds_go_to_vine": float(drone_secs[DRONE_GO_TO_VINE]),
+                "drone_seconds_deliver": float(drone_secs[DRONE_DELIVER]),
+                "drone_seconds_go_to_charge": float(drone_secs[DRONE_GO_TO_CHARGE]),
+                "drone_seconds_charge": float(drone_secs[DRONE_CHARGE]),
+
+                "episode_fatigue_increase_total": float(self.ep_fatigue_increase_total),
+                "episode_delivered_delta_total": int(self.ep_delivered_delta_total),
+            }
+        else:
+            summary = {}
         
         # Build infos
         infos = {
@@ -597,6 +657,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 "harvest": harvest_events[i],
                 "enqueue": enqueue_events[i],
                 "drone_credit_delivery": drone_credit_deliveries[i],
+                "episode_summary": summary
             }
             for i, agent_id in enumerate(self.agents)
         }
