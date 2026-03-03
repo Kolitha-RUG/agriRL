@@ -87,18 +87,22 @@ if __name__ == "__main__":
     ModelCatalog.register_custom_model("torch_action_mask_model", TorchActionMaskModel)
 
     env_config = dict(
-        render_mode="terminal",
+        render_mode=None,
         topology_mode="row",
         vineyard_file=os.path.join(PROJECT_DIR, "data", "Vinha_Maria_Teresa_RL.xlsx"),
         num_humans=5,
-        num_drones=1,
+        num_drones=2,
         max_boxes_per_vine=10,
         max_steps=1000,
         max_backlog=10,
         dt=1.0,
-        harvest_time=5.0,
-        human_speed=0.5,
+        harvest_time=10.0,
+        human_speed=0.2,
         drone_speed=1.0,
+        reward_backlog_penalty= 0.4,
+        reward_fatigue_penalty = 5,
+        reward_harvest=1.0,
+        reward_delivery=5.0
     )
 
     config = (
@@ -106,7 +110,7 @@ if __name__ == "__main__":
 
         .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
         .environment(env="MultiAgentVine", env_config=env_config)
-        .env_runners(num_env_runners=0)
+        .env_runners(num_env_runners=6, num_envs_per_env_runner=1)
         .training(
             gamma=0.99,
             lr=3e-4,

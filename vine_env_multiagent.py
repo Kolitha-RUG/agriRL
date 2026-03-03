@@ -131,14 +131,14 @@ class MultiAgentVineEnv(MultiAgentEnv):
         harvest_time: float = 10.0,
         enqueue_time: float = 1.0,
         rest_time: float = 5.0,
-        human_speed: float = 0.5,
+        human_speed: float = 0.3,
         drone_speed: float = 1.0,
         vineyard_file: str = "data/Vinha_Maria_Teresa_RL.xlsx",
         reward_delivery: float = 1.0,
         reward_backlog_penalty: float = 0.5,
-        reward_fatigue_penalty: float = 0.5,
-        reward_harvest: float = 0.05,
-        reward_enqueue: float = 0.10,
+        reward_fatigue_penalty: float = 0.8,
+        reward_harvest: float = 0.08,
+        reward_enqueue: float = 0.05,
         reward_drone_credit: float = 1.0,
 
 
@@ -318,6 +318,16 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # Initialize counters
         self.steps = 0
         self.delivered = 0
+        # --- KPI accumulators (steps-based) ---
+        self.ep_step_count = 0
+        self.ep_delivered_total = 0  # will accumulate delivered_delta
+        self.ep_backlog_sum = 0
+        self.ep_backlog_peak = 0
+
+        self.ep_human_rest_steps = 0
+        self.ep_human_busy_steps = 0
+
+        self.ep_drone_flying_steps = 0
         # --- episode counters (for TensorBoard) ---
         self.ep_human_action_steps = np.zeros((self.num_humans, self.num_actions), dtype=np.int32)
         self.ep_human_action_seconds = np.zeros((self.num_humans, self.num_actions), dtype=np.float32)
@@ -327,6 +337,12 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         self.ep_fatigue_increase_total = 0.0
         self.ep_delivered_delta_total = 0
+
+        # --- fatigue KPIs (steps-based) ---
+        self.ep_fatigue_sum = 0.0          # sum over steps of mean fatigue across humans
+        self.ep_fatigue_peak = 0.0         # max fatigue seen (any human, any time)
+        self.ep_fatigue_hi_steps = 0        # optional: count of human-steps above threshold
+        self.fatigue_hi_threshold = 0.7     # choose threshold
         # Initialize humans at their assigned vines
         self.humans = []
         for h in range(self.num_humans):
@@ -381,11 +397,11 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 h.time_left -= self.dt
                 # Fatigue accumulates/recover while action is being executed
                 if h.current_action == ACTION_HARVEST:
-                    h.fatigue = float(np.clip(h.fatigue + 0.002 * self.dt, 0.0, 1.0))
+                    h.fatigue = float(np.clip(h.fatigue + 0.2 * self.dt, 0.0, 1.0))
                 elif h.current_action == ACTION_TRANSPORT:
-                    h.fatigue = float(np.clip(h.fatigue + 0.004 * self.dt, 0.0, 1.0))
+                    h.fatigue = float(np.clip(h.fatigue + 0.4 * self.dt, 0.0, 1.0))
                 elif h.current_action == ACTION_REST:
-                    h.fatigue = float(np.clip(h.fatigue - 0.006 * self.dt, 0.0, 1.0))
+                    h.fatigue = float(np.clip(h.fatigue - 0.2 * self.dt, 0.0, 1.0))
                 
                 if h.time_left <= 0.0:
                     h.busy = False
@@ -575,12 +591,46 @@ class MultiAgentVineEnv(MultiAgentEnv):
             self.ep_drone_status_seconds[j, s] += self.dt
 
         self.ep_fatigue_increase_total += float(sum(fatigue_increase))
+        
+        # --- fatigue KPI update (per step) ---
+        mean_fatigue_t = float(np.mean([h.fatigue for h in self.humans]))
+        max_fatigue_t = float(np.max([h.fatigue for h in self.humans]))
+
+        self.ep_fatigue_sum += mean_fatigue_t
+        if max_fatigue_t > self.ep_fatigue_peak:
+            self.ep_fatigue_peak = max_fatigue_t
+
+        # optional: count human-steps above threshold
+        self.ep_fatigue_hi_steps += int(sum(1 for h in self.humans if h.fatigue >= self.fatigue_hi_threshold))
 
         # Calculate rewards
         delivered_delta = self.delivered - delivered_before
         self.ep_delivered_delta_total += int(delivered_delta)
-
         backlog_total = sum(v.queued_boxes for v in self.vines)
+        # --- update KPI accumulators ---
+        self.ep_step_count += 1
+
+        self.ep_delivered_total += int(delivered_delta)
+
+        self.ep_backlog_sum += int(backlog_total)
+        if backlog_total > self.ep_backlog_peak:
+            self.ep_backlog_peak = int(backlog_total)
+
+        # Humans: count REST + BUSY (busy means executing a task; you can treat REST separately)
+        for h in self.humans:
+            # Count rest steps by the action being executed (mode), not by action_dict
+            if h.busy and h.current_action == ACTION_REST:
+                self.ep_human_rest_steps += 1
+
+            # "Utilization" = busy doing work actions (not rest)
+            if h.busy and h.current_action in (ACTION_HARVEST, ACTION_TRANSPORT, ACTION_ENQUEUE):
+                self.ep_human_busy_steps += 1
+
+        # Drones: utilization = flying steps
+        for d in self.drones:
+            if d.busy and d.status in (DRONE_GO_TO_VINE, DRONE_DELIVER):
+                self.ep_drone_flying_steps += 1
+
         fatigue_total = sum(fatigue_increase)
         shared_reward = (
                         self.reward_delivery * delivered_delta
@@ -610,23 +660,39 @@ class MultiAgentVineEnv(MultiAgentEnv):
         if terminated or truncated:
             # aggregate across humans
             human_steps = self.ep_human_action_steps.sum(axis=0)
-            human_secs = self.ep_human_action_seconds.sum(axis=0)
 
             # aggregate across drones
             drone_steps = self.ep_drone_status_steps.sum(axis=0)
-            drone_secs = self.ep_drone_status_seconds.sum(axis=0)
 
+            steps = max(1, int(self.ep_step_count))
+
+            mean_backlog = self.ep_backlog_sum / steps
+            peak_backlog = int(self.ep_backlog_peak)
+
+            delivered_total = int(self.ep_delivered_total)
+            throughput_per_100 = 100.0 * delivered_total / steps
+
+            human_total_steps = max(1, self.num_humans * steps)
+            rest_ratio = self.ep_human_rest_steps / human_total_steps
+            human_util = self.ep_human_busy_steps / human_total_steps
+
+            drone_total_steps = max(1, self.num_drones * steps)
+            drone_util = self.ep_drone_flying_steps / drone_total_steps
             # Put into a special key so RLlib can pick it up easily in callbacks
             summary = {
+
+                "kpi_delivered_total": delivered_total,
+                "kpi_throughput_per_100_steps": throughput_per_100,
+                "kpi_mean_backlog": float(mean_backlog),
+                "kpi_peak_backlog": peak_backlog,
+                "kpi_rest_ratio": float(rest_ratio),
+                "kpi_human_utilization": float(human_util),
+                "kpi_drone_utilization": float(drone_util),
+                
                 "human_steps_harvest": int(human_steps[ACTION_HARVEST]),
                 "human_steps_transport": int(human_steps[ACTION_TRANSPORT]),
                 "human_steps_enqueue": int(human_steps[ACTION_ENQUEUE]),
                 "human_steps_rest": int(human_steps[ACTION_REST]),
-
-                "human_seconds_harvest": float(human_secs[ACTION_HARVEST]),
-                "human_seconds_transport": float(human_secs[ACTION_TRANSPORT]),
-                "human_seconds_enqueue": float(human_secs[ACTION_ENQUEUE]),
-                "human_seconds_rest": float(human_secs[ACTION_REST]),
 
                 "drone_steps_idle": int(drone_steps[DRONE_IDLE]),
                 "drone_steps_go_to_vine": int(drone_steps[DRONE_GO_TO_VINE]),
@@ -634,14 +700,12 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 "drone_steps_go_to_charge": int(drone_steps[DRONE_GO_TO_CHARGE]),
                 "drone_steps_charge": int(drone_steps[DRONE_CHARGE]),
 
-                "drone_seconds_idle": float(drone_secs[DRONE_IDLE]),
-                "drone_seconds_go_to_vine": float(drone_secs[DRONE_GO_TO_VINE]),
-                "drone_seconds_deliver": float(drone_secs[DRONE_DELIVER]),
-                "drone_seconds_go_to_charge": float(drone_secs[DRONE_GO_TO_CHARGE]),
-                "drone_seconds_charge": float(drone_secs[DRONE_CHARGE]),
-
                 "episode_fatigue_increase_total": float(self.ep_fatigue_increase_total),
                 "episode_delivered_delta_total": int(self.ep_delivered_delta_total),
+
+                "kpi_mean_fatigue": float(self.ep_fatigue_sum / steps),
+                "kpi_peak_fatigue": float(self.ep_fatigue_peak),
+                "kpi_fatigue_hi_ratio": float(self.ep_fatigue_hi_steps / max(1, self.num_humans * steps)),
             }
         else:
             summary = {}
@@ -896,7 +960,7 @@ def test_environment():
     env = MultiAgentVineEnv(
         render_mode="human",
         topology_mode="row",
-        num_humans=10,
+        num_humans=5,
         num_drones=1,
         max_boxes_per_vine=0.01,
         max_backlog=5,
