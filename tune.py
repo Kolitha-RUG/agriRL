@@ -24,21 +24,21 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class VineyardKPI(DefaultCallbacks):
     def on_episode_end(self, *, episode, **kwargs):
-        # Grab one agent's info at the end (all agents carry the same episode_summary dict)
+
         summary = None
         for agent_id in episode.get_agents():
             info = episode.last_info_for(agent_id)
             if isinstance(info, dict):
                 summary = info.get("episode_summary", None)
-                if summary:  # non-empty dict
+                if summary:  
                     break
 
         if not summary:
             return
 
-        # Write each summary field into TensorBoard custom_metrics
+
         for k, v in summary.items():
-            # ensure TB-friendly scalars
+
             episode.custom_metrics[k] = float(v)
 
 
@@ -58,7 +58,7 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
         )
 
     def forward(self, input_dict, state, seq_lens):
-        x = input_dict["obs"]  # [B, base_obs_dim + num_actions]
+        x = input_dict["obs"]  
         obs = x[:, : self.base_obs_dim]
         action_mask = x[:, self.base_obs_dim :]
 
@@ -99,10 +99,10 @@ if __name__ == "__main__":
         harvest_time=10.0,
         human_speed=0.2,
         drone_speed=1.0,
-        reward_backlog_penalty= 0.4,
-        reward_fatigue_penalty = 5,
-        reward_harvest=1.0,
-        reward_delivery=5.0
+        reward_backlog_penalty= 2,
+        reward_fatigue_penalty = 0.9,
+        reward_delivery=1.0,
+        reward_fatigue_level_penalty= 0.8
     )
 
     config = (
@@ -145,3 +145,13 @@ if __name__ == "__main__":
     print("Done. TensorBoard logdir: ray_results_vine")
 
 #  tensorboard --logdir=ray_results_vine/vineyard_ppo
+
+# r_delivery_per_step ≈ +0.18
+
+# r_backlog_per_step ≈ −0.031
+
+# r_fatigue_inc_per_step ≈ −0.098
+
+# r_fatigue_level_per_step ≈ −0.37
+
+# r_total_per_step ≈ −0.32

@@ -69,6 +69,7 @@ class Human:
         self.busy = False
         self.time_left = 0.0
         self.delivered_count = 0
+        self.transport_fatigue_multiplier = 1.0
 
 
 class Drone:
@@ -140,6 +141,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         reward_harvest: float = 0.08,
         reward_enqueue: float = 0.05,
         reward_drone_credit: float = 1.0,
+        reward_fatigue_level_penalty: float = 2.0
 
 
     ):
@@ -172,6 +174,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.reward_harvest = float(reward_harvest)
         self.reward_enqueue = float(reward_enqueue)
         self.reward_drone_credit = float(reward_drone_credit)
+        self.reward_fatigue_level_penalty = float(reward_fatigue_level_penalty)
 
         # Everything else stays the same from your original __init__
         self.num_vines = compute_num_vines(self.topology_mode, self.vineyard_file)
@@ -183,19 +186,25 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.queue_contributors = deque()
 
         self.obs_dim = (
-            self.num_vines * 2              # vine positions
-            + 2                             # collection point
-            + 2                             # charging point  <-- ADD THIS
+            self.num_vines * 2              # vine x,y positions
+            + self.num_vines                # vine z
+            + 2                             # collection point x,y
+            + 1                             # collection point z
+            + 2                             # charging point x,y
+            + 1                             # charging point z
             + self.num_vines                # boxes_remaining
             + self.num_vines                # queued_boxes
-            + 2                             # own position
+            + 2                             # own x,y position
+            + 1                             # own z position
             + 1                             # fatigue
             + self.num_actions              # current action one-hot
             + 1                             # own has_box
             + self.num_vines                # assigned_vine one-hot
-            + (self.num_humans - 1) * 2     # other humans positions
+            + (self.num_humans - 1) * 2     # other humans x,y
+            + (self.num_humans - 1)         # other humans z
             + (self.num_humans - 1)         # other humans has_box
-            + self.num_drones * 2           # drone positions
+            + self.num_drones * 2           # drone x,y positions
+            + self.num_drones               # drone z positions
             + self.num_drones * self.num_drone_status  # drone status one-hot
             + self.num_drones               # drone has_box
             + self.num_drones               # drone battery
@@ -225,6 +234,15 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.field_size = np.array([1.0, 1.0], dtype=np.float32)
         self.x_min = 0.0
         self.y_min = 0.0
+        self.collection_z = 0.0
+        self.charging_z = 0.0
+        self.z_min = 0.0
+        self.z_range = 1.0
+
+        # slope / fatigue tuning
+        self.human_transport_fatigue_rate = 0.4   # base fatigue rate during transport
+        self.slope_time_factor = 1.5              # increase travel time with slope grade
+        self.slope_fatigue_factor = 2.0           # increase fatigue with uphill slope
         self.steps = 0
         self.delivered = 0
 
@@ -304,16 +322,27 @@ class MultiAgentVineEnv(MultiAgentEnv):
         else:
             raise ValueError(f"Unknown topology_mode: {self.topology_mode}")
         
-        # Calculate field dimensions
-        xs = np.array([v.position[0] for v in self.vines])
-        ys = np.array([v.position[1] for v in self.vines])
-        self.x_min = xs.min()
-        self.y_min = ys.min()
-        self.field_size = np.array([xs.max() - self.x_min, ys.max() - self.y_min], dtype=np.float32)
+        xs = np.array([v.position[0] for v in self.vines], dtype=np.float32)
+        ys = np.array([v.position[1] for v in self.vines], dtype=np.float32)
+        zs = np.array([v.z for v in self.vines], dtype=np.float32)
+
+        self.x_min = float(xs.min())
+        self.y_min = float(ys.min())
+        self.z_min = float(zs.min())
+
+        self.field_size = np.array(
+            [xs.max() - self.x_min, ys.max() - self.y_min],
+            dtype=np.float32
+        )
+        self.z_range = float(max(zs.max() - self.z_min, 1e-6))
         
         # Collection point at right edge, center height
         self.collection_point = np.array([xs.max(), np.mean(ys)], dtype=np.float32)
         self.charging_point = np.array([self.x_min, self.y_min], dtype=np.float32)
+
+        # choose realistic z levels for non-vine locations
+        self.collection_z = float(np.min(zs))
+        self.charging_z = float(zs.max())
         
         # Initialize counters
         self.steps = 0
@@ -343,6 +372,13 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.ep_fatigue_peak = 0.0         # max fatigue seen (any human, any time)
         self.ep_fatigue_hi_steps = 0        # optional: count of human-steps above threshold
         self.fatigue_hi_threshold = 0.7     # choose threshold
+
+        # --- reward-term breakdown (episode accumulators) ---
+        self.ep_r_delivery_sum = 0.0
+        self.ep_r_fatigue_inc_sum = 0.0
+        self.ep_r_backlog_sum = 0.0
+        self.ep_r_fatigue_level_sum = 0.0
+        self.ep_reward_sum = 0.0
         # Initialize humans at their assigned vines
         self.humans = []
         for h in range(self.num_humans):
@@ -399,7 +435,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 if h.current_action == ACTION_HARVEST:
                     h.fatigue = float(np.clip(h.fatigue + 0.2 * self.dt, 0.0, 1.0))
                 elif h.current_action == ACTION_TRANSPORT:
-                    h.fatigue = float(np.clip(h.fatigue + 0.4 * self.dt, 0.0, 1.0))
+                    mult = getattr(h, "transport_fatigue_multiplier", 1.0)
+                    fatigue_rate = self.human_transport_fatigue_rate * mult
+                    h.fatigue = float(np.clip(h.fatigue + fatigue_rate * self.dt, 0.0, 1.0))
                 elif h.current_action == ACTION_REST:
                     h.fatigue = float(np.clip(h.fatigue - 0.2 * self.dt, 0.0, 1.0))
                 
@@ -416,6 +454,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
                             h.delivered_count += 1
                             individual_deliveries[i] = 1
                         h.position = self.collection_point.copy()
+                        h.transport_fatigue_multiplier = 1.0
             if (not h.busy) and (not h.has_box):
                 cur_v = self.vines[h.assigned_vine]
 
@@ -471,10 +510,13 @@ class MultiAgentVineEnv(MultiAgentEnv):
                     
             elif a == ACTION_TRANSPORT:
                 if h.has_box:
-                    dist = float(np.linalg.norm(h.position - self.collection_point))
-                    travel_time = dist / max(self.human_speed, 1e-6)
+                    start_xyz = self._get_human_xyz(h)
+                    end_xyz = self._get_collection_xyz()
+                    travel_time, fatigue_multiplier = self._human_transport_costs(start_xyz, end_xyz)
+
                     h.busy = True
                     h.time_left = travel_time
+                    h.transport_fatigue_multiplier = fatigue_multiplier
 
             elif a == ACTION_REST:
                 h.busy = True
@@ -631,12 +673,21 @@ class MultiAgentVineEnv(MultiAgentEnv):
             if d.busy and d.status in (DRONE_GO_TO_VINE, DRONE_DELIVER):
                 self.ep_drone_flying_steps += 1
 
-        fatigue_total = sum(fatigue_increase)
-        shared_reward = (
-                        self.reward_delivery * delivered_delta
-                        - self.reward_fatigue_penalty * fatigue_total
-                        - self.reward_backlog_penalty * backlog_total
-                    )
+        fatigue_total = float(sum(fatigue_increase))
+
+        # --- reward-term breakdown (per step) ---
+        r_delivery = self.reward_delivery * float(delivered_delta)
+        r_fat_inc  = - self.reward_fatigue_penalty * fatigue_total
+        r_backlog  = - self.reward_backlog_penalty * float(backlog_total)
+        r_fat_lvl  = - self.reward_fatigue_level_penalty * float(mean_fatigue_t)
+
+        shared_reward = r_delivery + r_fat_inc + r_backlog + r_fat_lvl
+        # accumulate episode sums
+        self.ep_r_delivery_sum += float(r_delivery)
+        self.ep_r_fatigue_inc_sum += float(r_fat_inc)
+        self.ep_r_backlog_sum += float(r_backlog)
+        self.ep_r_fatigue_level_sum += float(r_fat_lvl)
+        self.ep_reward_sum += float(shared_reward)
 
         rewards = {agent_id: float(shared_reward) for agent_id in self.agents}
         
@@ -689,16 +740,16 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 "kpi_human_utilization": float(human_util),
                 "kpi_drone_utilization": float(drone_util),
                 
-                "human_steps_harvest": int(human_steps[ACTION_HARVEST]),
-                "human_steps_transport": int(human_steps[ACTION_TRANSPORT]),
-                "human_steps_enqueue": int(human_steps[ACTION_ENQUEUE]),
-                "human_steps_rest": int(human_steps[ACTION_REST]),
+                # "human_steps_harvest": int(human_steps[ACTION_HARVEST]),
+                # "human_steps_transport": int(human_steps[ACTION_TRANSPORT]),
+                # "human_steps_enqueue": int(human_steps[ACTION_ENQUEUE]),
+                # "human_steps_rest": int(human_steps[ACTION_REST]),
 
-                "drone_steps_idle": int(drone_steps[DRONE_IDLE]),
-                "drone_steps_go_to_vine": int(drone_steps[DRONE_GO_TO_VINE]),
-                "drone_steps_deliver": int(drone_steps[DRONE_DELIVER]),
-                "drone_steps_go_to_charge": int(drone_steps[DRONE_GO_TO_CHARGE]),
-                "drone_steps_charge": int(drone_steps[DRONE_CHARGE]),
+                # "drone_steps_idle": int(drone_steps[DRONE_IDLE]),
+                # "drone_steps_go_to_vine": int(drone_steps[DRONE_GO_TO_VINE]),
+                # "drone_steps_deliver": int(drone_steps[DRONE_DELIVER]),
+                # "drone_steps_go_to_charge": int(drone_steps[DRONE_GO_TO_CHARGE]),
+                # "drone_steps_charge": int(drone_steps[DRONE_CHARGE]),
 
                 "episode_fatigue_increase_total": float(self.ep_fatigue_increase_total),
                 "episode_delivered_delta_total": int(self.ep_delivered_delta_total),
@@ -706,7 +757,14 @@ class MultiAgentVineEnv(MultiAgentEnv):
                 "kpi_mean_fatigue": float(self.ep_fatigue_sum / steps),
                 "kpi_peak_fatigue": float(self.ep_fatigue_peak),
                 "kpi_fatigue_hi_ratio": float(self.ep_fatigue_hi_steps / max(1, self.num_humans * steps)),
+
+                "r_delivery_per_step": float(self.ep_r_delivery_sum / steps),
+                "r_fatigue_inc_per_step": float(self.ep_r_fatigue_inc_sum / steps),
+                "r_backlog_per_step": float(self.ep_r_backlog_sum / steps),
+                "r_fatigue_level_per_step": float(self.ep_r_fatigue_level_sum / steps),
+                "r_total_per_step": float(self.ep_reward_sum / steps),
             }
+
         else:
             summary = {}
         
@@ -729,10 +787,84 @@ class MultiAgentVineEnv(MultiAgentEnv):
         return observations, rewards, terminateds, truncateds, infos
 
     def _normalize_position(self, pos: np.ndarray) -> np.ndarray:
-        """Normalize a position to [0, 1] range."""
+        """Normalize a 2D position to [0, 1] range."""
         x = (pos[0] - self.x_min) / max(self.field_size[0], 1e-6)
         y = (pos[1] - self.y_min) / max(self.field_size[1], 1e-6)
         return np.clip(np.array([x, y], dtype=np.float32), 0.0, 1.0)
+
+    def _normalize_z(self, z: float) -> float:
+        """Normalize z to [0, 1]."""
+        zn = (float(z) - self.z_min) / max(self.z_range, 1e-6)
+        return float(np.clip(zn, 0.0, 1.0))
+
+    def get_vine_xyz(self, vine_idx: int) -> np.ndarray:
+        """Return vine location as xyz."""
+        v = self.vines[vine_idx]
+        return np.array([v.position[0], v.position[1], v.z], dtype=np.float32)
+
+    def _get_collection_xyz(self) -> np.ndarray:
+        return np.array(
+            [self.collection_point[0], self.collection_point[1], self.collection_z],
+            dtype=np.float32
+        )
+
+    def _get_charging_xyz(self) -> np.ndarray:
+        return np.array(
+            [self.charging_point[0], self.charging_point[1], self.charging_z],
+            dtype=np.float32
+        )
+
+    def _get_human_xyz(self, human: Human) -> np.ndarray:
+        """
+        Approximate current human xyz.
+        Humans mostly operate either at their assigned vine or at collection point.
+        """
+        if np.allclose(human.position, self.collection_point):
+            z = self.collection_z
+        else:
+            z = self.vines[human.assigned_vine].z
+        return np.array([human.position[0], human.position[1], z], dtype=np.float32)
+
+    def _get_drone_xyz(self, drone: Drone) -> np.ndarray:
+        """
+        Approximate current drone xyz from its current 2D position.
+        """
+        if np.allclose(drone.position, self.collection_point):
+            z = self.collection_z
+        elif np.allclose(drone.position, self.charging_point):
+            z = self.charging_z
+        elif drone.target_vine is not None:
+            z = self.vines[drone.target_vine].z
+        else:
+            # fallback: nearest vine altitude
+            dists = [np.linalg.norm(v.position - drone.position) for v in self.vines]
+            nearest = int(np.argmin(dists))
+            z = self.vines[nearest].z
+        return np.array([drone.position[0], drone.position[1], z], dtype=np.float32)
+
+    def _grade_between_xyz(self, start_xyz: np.ndarray, end_xyz: np.ndarray) -> float:
+        """
+        Return slope grade = |dz| / horizontal_distance.
+        """
+        dxy = float(np.linalg.norm(end_xyz[:2] - start_xyz[:2]))
+        dz = float(end_xyz[2] - start_xyz[2])
+        return abs(dz) / max(dxy, 1e-6)
+
+    def _human_transport_costs(self, start_xyz: np.ndarray, end_xyz: np.ndarray) -> Tuple[float, float]:
+        """
+        Compute slope-adjusted human transport travel time and fatigue multiplier.
+        """
+        dxy = float(np.linalg.norm(end_xyz[:2] - start_xyz[:2]))
+        grade = self._grade_between_xyz(start_xyz, end_xyz)
+
+        base_time = dxy / max(self.human_speed, 1e-6)
+        travel_time = base_time * (1.0 + self.slope_time_factor * grade)
+
+        dz = float(end_xyz[2] - start_xyz[2])
+        uphill_ratio = max(0.0, dz) / max(abs(dz), 1e-6) if abs(dz) > 1e-9 else 0.0
+        fatigue_multiplier = 1.0 + self.slope_fatigue_factor * grade * (0.5 + 0.5 * uphill_ratio)
+
+        return float(travel_time), float(fatigue_multiplier)
 
     def _get_obs_for_agent(self, agent_idx: int) -> np.ndarray:
         """
@@ -748,15 +880,21 @@ class MultiAgentVineEnv(MultiAgentEnv):
         
         # === SHARED STATE ===
         
-        # Vine positions (normalized)
+        # Vine positions (normalized x,y)
         for v in self.vines:
             obs.extend(self._normalize_position(v.position))
+
+        # Vine z values (normalized)
+        for v in self.vines:
+            obs.append(self._normalize_z(v.z))
         
-        # Collection point (normalized)
+        # Collection point (normalized x,y)
         obs.extend(self._normalize_position(self.collection_point))
+        obs.append(self._normalize_z(self.collection_z))
         
-        # Charging point (normalized)
+        # Charging point (normalized x,y)
         obs.extend(self._normalize_position(self.charging_point))
+        obs.append(self._normalize_z(self.charging_z))
         
         # Boxes remaining per vine (normalized)
         max_boxes_actual = max(v.total_boxes for v in self.vines) if self.vines else 1
@@ -770,7 +908,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # === OWN STATE ===
         
         # Own position
+        h_xyz = self._get_human_xyz(h)
         obs.extend(self._normalize_position(h.position))
+        obs.append(self._normalize_z(h_xyz[2]))
         
         # Own fatigue
         obs.append(h.fatigue)
@@ -788,8 +928,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
         
         for other_idx, other_h in enumerate(self.humans):
             if other_idx != agent_idx:
-                # Other's position
+                other_xyz = self._get_human_xyz(other_h)
                 obs.extend(self._normalize_position(other_h.position))
+                obs.append(self._normalize_z(other_xyz[2]))
         
         for other_idx, other_h in enumerate(self.humans):
             if other_idx != agent_idx:
@@ -799,7 +940,9 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # === DRONE STATES ===
         
         for d in self.drones:
+            d_xyz = self._get_drone_xyz(d)
             obs.extend(self._normalize_position(d.position))
+            obs.append(self._normalize_z(d_xyz[2]))
         
         for d in self.drones:
             obs.extend(one_hot(d.status, self.num_drone_status))
