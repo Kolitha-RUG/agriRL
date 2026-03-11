@@ -99,12 +99,19 @@ if __name__ == "__main__":
         harvest_time=10.0,
         human_speed=0.2,
         drone_speed=1.0,
-        reward_backlog_penalty= 2,
-        reward_fatigue_penalty = 0.9,
-        reward_delivery=1.0,
-        reward_fatigue_level_penalty= 0.8
+        reward_backlog_penalty= 0.07,
+        reward_fatigue_inc_penalty = 2.5,
+        reward_delivery=1.7,
+        reward_fatigue_level_penalty= 0.5
     )
 
+# delivery weight: 0.2 / 0.12 = 1.67
+
+# fatigue increase weight: 0.2 / 0.08 = 2.5
+
+# backlog weight: 0.2 / 3.0 = 0.067
+
+# fatigue level weight: 0.2 / 0.5 = 0.4
     config = (
         PPOConfig()
 
@@ -155,3 +162,13 @@ if __name__ == "__main__":
 # r_fatigue_level_per_step ≈ −0.37
 
 # r_total_per_step ≈ −0.32
+
+# Then:
+
+# delivery weight: 0.2 / 0.12 = 1.67
+
+# fatigue increase weight: 0.2 / 0.08 = 2.5
+
+# backlog weight: 0.2 / 3.0 = 0.067
+
+# fatigue level weight: 0.2 / 0.5 = 0.4
