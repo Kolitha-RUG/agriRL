@@ -137,7 +137,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         vineyard_file: str = "data/Vinha_Maria_Teresa_RL.xlsx",
         reward_delivery: float = 1.0,
         reward_backlog_penalty: float = 0.5,
-        reward_fatigue_penalty: float = 0.8,
+        reward_fatigue_inc_penalty: float = 0.8,
         reward_harvest: float = 0.08,
         reward_enqueue: float = 0.05,
         reward_drone_credit: float = 1.0,
@@ -170,7 +170,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         self.reward_delivery = float(reward_delivery)
         self.reward_backlog_penalty = float(reward_backlog_penalty)
-        self.reward_fatigue_penalty = float(reward_fatigue_penalty)
+        self.reward_fatigue_inc_penalty = float(reward_fatigue_inc_penalty)
         self.reward_harvest = float(reward_harvest)
         self.reward_enqueue = float(reward_enqueue)
         self.reward_drone_credit = float(reward_drone_credit)
@@ -677,7 +677,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         # --- reward-term breakdown (per step) ---
         r_delivery = self.reward_delivery * float(delivered_delta)
-        r_fat_inc  = - self.reward_fatigue_penalty * fatigue_total
+        r_fat_inc  = - self.reward_fatigue_inc_penalty * fatigue_total
         r_backlog  = - self.reward_backlog_penalty * float(backlog_total)
         r_fat_lvl  = - self.reward_fatigue_level_penalty * float(mean_fatigue_t)
 
