@@ -210,13 +210,18 @@ class MultiAgentVineEnv(MultiAgentEnv):
             + self.num_drones               # drone battery
         )
         # Flat obs: [obs_vector, action_mask]
-        self.flat_obs_dim = self.obs_dim + self.num_actions
-
         self.observation_spaces = {
-            agent_id: spaces.Box(low=0.0, high=1.0, shape=(self.flat_obs_dim,), dtype=np.float32)
+            agent_id: spaces.Dict({
+                "obs": spaces.Box(low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32),
+                "action_mask": spaces.Box(low=0.0, high=1.0, shape=(self.num_actions,), dtype=np.float32),
+            })
             for agent_id in self.possible_agents
         }
-        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(self.flat_obs_dim,), dtype=np.float32)
+
+        self.observation_space = spaces.Dict({
+            "obs": spaces.Box(low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32),
+            "action_mask": spaces.Box(low=0.0, high=1.0, shape=(self.num_actions,), dtype=np.float32),
+        })
 
         self.action_spaces = {
             agent_id: spaces.Discrete(self.num_actions)
@@ -645,26 +650,26 @@ class MultiAgentVineEnv(MultiAgentEnv):
         # optional: count human-steps above threshold
         self.ep_fatigue_hi_steps += int(sum(1 for h in self.humans if h.fatigue >= self.fatigue_hi_threshold))
 
+
+
         # Calculate rewards
         delivered_delta = self.delivered - delivered_before
         self.ep_delivered_delta_total += int(delivered_delta)
         backlog_total = sum(v.queued_boxes for v in self.vines)
+
         # --- update KPI accumulators ---
         self.ep_step_count += 1
-
         self.ep_delivered_total += int(delivered_delta)
 
         self.ep_backlog_sum += int(backlog_total)
         if backlog_total > self.ep_backlog_peak:
             self.ep_backlog_peak = int(backlog_total)
 
-        # Humans: count REST + BUSY (busy means executing a task; you can treat REST separately)
+        # Humans: count REST + BUSY
         for h in self.humans:
-            # Count rest steps by the action being executed (mode), not by action_dict
             if h.busy and h.current_action == ACTION_REST:
                 self.ep_human_rest_steps += 1
 
-            # "Utilization" = busy doing work actions (not rest)
             if h.busy and h.current_action in (ACTION_HARVEST, ACTION_TRANSPORT, ACTION_ENQUEUE):
                 self.ep_human_busy_steps += 1
 
@@ -675,22 +680,51 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         fatigue_total = float(sum(fatigue_increase))
 
-        # --- reward-term breakdown (per step) ---
-        r_delivery = self.reward_delivery * float(delivered_delta)
-        r_fat_inc  = - self.reward_fatigue_inc_penalty * fatigue_total
-        r_backlog  = - self.reward_backlog_penalty * float(backlog_total)
-        r_fat_lvl  = - self.reward_fatigue_level_penalty * float(mean_fatigue_t)
+        # -----------------------------
+        # TEAM REWARD
+        # -----------------------------
+        backlog_norm = float(backlog_total) / max(1, self.num_vines * self.max_backlog)
 
-        shared_reward = r_delivery + r_fat_inc + r_backlog + r_fat_lvl
-        # accumulate episode sums
+        # penalize only high fatigue, not all fatigue
+        fatigue_excess = float(np.mean([max(0.0, h.fatigue - 0.6) for h in self.humans]))
+
+        r_delivery = self.reward_delivery * float(delivered_delta)
+        r_fat_inc = - self.reward_fatigue_inc_penalty * fatigue_total
+        r_backlog = - self.reward_backlog_penalty * backlog_norm
+        r_fat_lvl = - self.reward_fatigue_level_penalty * fatigue_excess
+
+        team_reward = r_delivery + r_fat_inc + r_backlog + r_fat_lvl
+
+        # accumulate episode sums using team terms
         self.ep_r_delivery_sum += float(r_delivery)
         self.ep_r_fatigue_inc_sum += float(r_fat_inc)
         self.ep_r_backlog_sum += float(r_backlog)
         self.ep_r_fatigue_level_sum += float(r_fat_lvl)
-        self.ep_reward_sum += float(shared_reward)
 
-        rewards = {agent_id: float(shared_reward) for agent_id in self.agents}
-        
+        # -----------------------------
+        # HYBRID TEAM + LOCAL REWARD
+        # -----------------------------
+        lambda_team = 0.75
+        rewards = {}
+
+        for i, agent_id in enumerate(self.agents):
+            local_reward = (
+                self.reward_delivery * float(individual_deliveries[i])
+                # + self.reward_drone_credit * float(drone_credit_deliveries[i])
+                + self.reward_harvest * float(harvest_events[i])
+                # optional: keep enqueue tiny, or set to 0.0 if you want
+                # + self.reward_enqueue * float(enqueue_events[i])
+                - self.reward_fatigue_inc_penalty * float(fatigue_increase[i])
+            )
+
+            agent_reward = lambda_team * team_reward + (1.0 - lambda_team) * local_reward
+            rewards[agent_id] = float(agent_reward)
+
+        # for episode-level logging
+        self.ep_reward_sum += float(np.mean(list(rewards.values())))
+
+
+
         # Check termination conditions
         all_harvested = all(v.boxes_remaining == 0 for v in self.vines)
         no_queue = all(v.queued_boxes == 0 for v in self.vines)
@@ -979,7 +1013,14 @@ class MultiAgentVineEnv(MultiAgentEnv):
         obs = np.clip(obs, 0.0, 1.0).astype(np.float32)
         mask = mask.astype(np.float32)
 
-        return np.concatenate([obs, mask], axis=0).astype(np.float32)
+        obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+        obs = np.clip(obs, 0.0, 1.0).astype(np.float32)
+        mask = mask.astype(np.float32)
+
+        return {
+            "obs": obs,
+            "action_mask": mask,
+        }
 
 
     def render(self):

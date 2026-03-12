@@ -41,26 +41,23 @@ class VineyardKPI(DefaultCallbacks):
 
             episode.custom_metrics[k] = float(v)
 
-
 class TorchActionMaskModel(TorchModelV2, nn.Module):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
 
         self.num_actions = int(action_space.n)
-        self.base_obs_dim = int(obs_space.shape[0] - self.num_actions)
 
-        base_obs_space = gym.spaces.Box(
-            low=0.0, high=1.0, shape=(self.base_obs_dim,), dtype=np.float32
-        )
+        # For Dict obs spaces, the actual feature vector is under "obs"
+        base_obs_space = obs_space["obs"]
+
         self.internal_model = FullyConnectedNetwork(
             base_obs_space, action_space, num_outputs, model_config, name + "_internal"
         )
 
     def forward(self, input_dict, state, seq_lens):
-        x = input_dict["obs"]  
-        obs = x[:, : self.base_obs_dim]
-        action_mask = x[:, self.base_obs_dim :]
+        obs = input_dict["obs"]["obs"]
+        action_mask = input_dict["obs"]["action_mask"]
 
         logits, _ = self.internal_model({"obs": obs})
         inf_mask = torch.clamp(torch.log(action_mask), min=FLOAT_MIN)
@@ -144,7 +141,7 @@ if __name__ == "__main__":
         run_config=RunConfig(
             name="vineyard_ppo",
             storage_path=os.path.join(PROJECT_DIR, "ray_results_vine"),
-            stop={"training_iteration": 50},
+            stop={"training_iteration": 100},
         ),
     )
 
