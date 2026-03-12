@@ -499,7 +499,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
                     if ok:
                         harvest_events[i] += 1
                         h.busy = True
-                        h.time_left = self.harvest_time
+                        fatigue_slowdown = 1.0 + 0.8 * h.fatigue
+                        h.time_left = self.harvest_time * fatigue_slowdown
                         h.position = vine.position.copy()
                         
             elif a == ACTION_ENQUEUE:
