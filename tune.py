@@ -106,9 +106,9 @@ if __name__ == "__main__":
         harvest_time=10.0,
         human_speed=0.2,
         drone_speed=1.0,
-        reward_backlog_penalty= 0.07,
-        reward_fatigue_inc_penalty = 2.5,
-        reward_delivery=1.7,
+        reward_backlog_penalty= 0.05,
+        reward_fatigue_inc_penalty = 1.5,
+        reward_delivery=3,
         reward_fatigue_level_penalty= 0.5
     )
 
