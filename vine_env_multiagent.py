@@ -1009,9 +1009,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
             mask[ACTION_ENQUEUE] = 0.0
 
         mask[ACTION_REST] = 1.0  # always vali
-        obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
-        obs = np.clip(obs, 0.0, 1.0).astype(np.float32)
-        mask = mask.astype(np.float32)
+
 
         obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
         obs = np.clip(obs, 0.0, 1.0).astype(np.float32)

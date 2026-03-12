@@ -1,6 +1,6 @@
 import os
 import ray
-import gym
+import gymnasium as gym
 import numpy as np
 
 from ray import tune
@@ -45,11 +45,17 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
+        print("MODEL obs_space:", obs_space)
+        print("MODEL original_space:", getattr(obs_space, "original_space", None))
 
         self.num_actions = int(action_space.n)
 
-        # For Dict obs spaces, the actual feature vector is under "obs"
-        base_obs_space = obs_space["obs"]
+        orig_space = getattr(obs_space, "original_space", obs_space)
+
+        if not isinstance(orig_space, gym.spaces.Dict):
+            raise ValueError(f"Expected Dict observation space, got {type(orig_space)}: {orig_space}")
+
+        base_obs_space = orig_space["obs"]
 
         self.internal_model = FullyConnectedNetwork(
             base_obs_space, action_space, num_outputs, model_config, name + "_internal"
@@ -68,7 +74,11 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
 
 
 def env_creator(env_config):
-    return MultiAgentVineEnv(**env_config)
+    env = MultiAgentVineEnv(**env_config)
+    print("ENV FILE:", MultiAgentVineEnv.__module__)
+    print("OBS SPACE TYPE:", type(env.observation_space))
+    print("OBS SPACE:", env.observation_space)
+    return env
 
 
 def policy_mapping_fn(agent_id, *args, **kwargs):
