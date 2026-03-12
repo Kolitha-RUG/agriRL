@@ -444,7 +444,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
                     fatigue_rate = self.human_transport_fatigue_rate * mult
                     h.fatigue = float(np.clip(h.fatigue + fatigue_rate * self.dt, 0.0, 1.0))
                 elif h.current_action == ACTION_REST:
-                    h.fatigue = float(np.clip(h.fatigue - 0.2 * self.dt, 0.0, 1.0))
+                    h.fatigue = float(np.clip(h.fatigue - 0.35 * self.dt, 0.0, 1.0))
                 
                 if h.time_left <= 0.0:
                     h.busy = False
