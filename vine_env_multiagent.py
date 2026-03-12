@@ -135,6 +135,7 @@ class MultiAgentVineEnv(MultiAgentEnv):
         human_speed: float = 0.3,
         drone_speed: float = 1.0,
         vineyard_file: str = "data/Vinha_Maria_Teresa_RL.xlsx",
+        local_vine_k: int = 6,
         reward_delivery: float = 1.0,
         reward_backlog_penalty: float = 0.5,
         reward_fatigue_inc_penalty: float = 0.8,
@@ -163,6 +164,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.drone_speed = float(drone_speed)
         self.vineyard_file = vineyard_file
 
+        self.local_vine_k = int(local_vine_k)
+
         self.drone_flight_time_full = 16.0  # seconds (960)
         self.drone_batt_drain_rate = 100.0 / self.drone_flight_time_full  # % per second
         self.drone_charge_time_full = 16.0  # or use real charge time if you have it
@@ -176,6 +179,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.reward_drone_credit = float(reward_drone_credit)
         self.reward_fatigue_level_penalty = float(reward_fatigue_level_penalty)
 
+
+
         # Everything else stays the same from your original __init__
         self.num_vines = compute_num_vines(self.topology_mode, self.vineyard_file)
         self.num_actions = 4
@@ -186,29 +191,29 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.queue_contributors = deque()
 
         self.obs_dim = (
-            self.num_vines * 2              # vine x,y positions
-            + self.num_vines                # vine z
-            + 2                             # collection point x,y
-            + 1                             # collection point z
-            + 2                             # charging point x,y
-            + 1                             # charging point z
-            + self.num_vines                # boxes_remaining
-            + self.num_vines                # queued_boxes
-            + 2                             # own x,y position
-            + 1                             # own z position
-            + 1                             # fatigue
-            + self.num_actions              # current action one-hot
-            + 1                             # own has_box
-            + self.num_vines                # assigned_vine one-hot
-            + (self.num_humans - 1) * 2     # other humans x,y
-            + (self.num_humans - 1)         # other humans z
-            + (self.num_humans - 1)         # other humans has_box
-            + self.num_drones * 2           # drone x,y positions
-            + self.num_drones               # drone z positions
-            + self.num_drones * self.num_drone_status  # drone status one-hot
-            + self.num_drones               # drone has_box
-            + self.num_drones               # drone battery
-        )
+                    self.local_vine_k * 2              # local vine x,y positions
+                    + self.local_vine_k                # local vine z
+                    + 2                                # collection point x,y
+                    + 1                                # collection point z
+                    + 2                                # charging point x,y
+                    + 1                                # charging point z
+                    + self.local_vine_k                # local boxes_remaining
+                    + self.local_vine_k                # local queued_boxes
+                    + 2                                # own x,y position
+                    + 1                                # own z position
+                    + 1                                # fatigue
+                    + self.num_actions                 # current action one-hot
+                    + 1                                # own has_box
+                    + 1                                # assigned_vine as scalar
+                    + (self.num_humans - 1) * 2        # other humans x,y
+                    + (self.num_humans - 1)            # other humans z
+                    + (self.num_humans - 1)            # other humans has_box
+                    + self.num_drones * 2              # drone x,y positions
+                    + self.num_drones                  # drone z positions
+                    + self.num_drones * self.num_drone_status
+                    + self.num_drones                  # drone has_box
+                    + self.num_drones                  # drone battery
+                )
         # Flat obs: [obs_vector, action_mask]
         self.observation_spaces = {
             agent_id: spaces.Dict({
@@ -349,6 +354,26 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.collection_z = float(np.min(zs))
         self.charging_z = float(zs.max())
         
+
+        # --- static per-episode caches for faster observations ---
+        self.vine_xy_norm = np.array(
+            [self._normalize_position(v.position) for v in self.vines],
+            dtype=np.float32
+        )
+
+        self.vine_z_norm = np.array(
+            [self._normalize_z(v.z) for v in self.vines],
+            dtype=np.float32
+        )
+
+        self.collection_xy_norm = self._normalize_position(self.collection_point).astype(np.float32)
+        self.collection_z_norm = np.float32(self._normalize_z(self.collection_z))
+
+        self.charging_xy_norm = self._normalize_position(self.charging_point).astype(np.float32)
+        self.charging_z_norm = np.float32(self._normalize_z(self.charging_z))
+
+        self.max_boxes_actual = max(v.total_boxes for v in self.vines) if self.vines else 1
+
         # Initialize counters
         self.steps = 0
         self.delivered = 0
@@ -901,90 +926,112 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
         return float(travel_time), float(fatigue_multiplier)
 
+    def _get_local_vine_indices(self, human: Human) -> np.ndarray:
+        """
+        Return indices of the K nearest vines to this human.
+        """
+        if self.num_vines == 0:
+            return np.array([], dtype=np.int32)
+
+        dists = np.array(
+            [np.linalg.norm(v.position - human.position) for v in self.vines],
+            dtype=np.float32,
+        )
+        k = min(self.local_vine_k, self.num_vines)
+        return np.argsort(dists)[:k].astype(np.int32)
+
     def _get_obs_for_agent(self, agent_idx: int) -> np.ndarray:
         """
-        Build observation for a specific agent.
-        
-        The observation includes:
-        - Shared environment state (vines, collection point, drones)
-        - Agent's own state (privileged information)
-        - Other agents' observable states
+        Build observation for a specific agent using only the nearest K vines.
         """
         obs = []
         h = self.humans[agent_idx]
-        
-        # === SHARED STATE ===
-        
-        # Vine positions (normalized x,y)
-        for v in self.vines:
-            obs.extend(self._normalize_position(v.position))
+        local_indices = self._get_local_vine_indices(h)
 
-        # Vine z values (normalized)
-        for v in self.vines:
-            obs.append(self._normalize_z(v.z))
-        
-        # Collection point (normalized x,y)
-        obs.extend(self._normalize_position(self.collection_point))
-        obs.append(self._normalize_z(self.collection_z))
-        
-        # Charging point (normalized x,y)
-        obs.extend(self._normalize_position(self.charging_point))
-        obs.append(self._normalize_z(self.charging_z))
-        
-        # Boxes remaining per vine (normalized)
-        max_boxes_actual = max(v.total_boxes for v in self.vines) if self.vines else 1
-        for v in self.vines:
-            obs.append(v.boxes_remaining / max(max_boxes_actual, 1))
-        
-        # Queued boxes per vine (normalized)
-        for v in self.vines:
-            obs.append(v.queued_boxes / max(self.max_backlog, 1))
-        
+        # === LOCAL VINE STATE ===
+
+        # local vine positions
+        for slot in range(self.local_vine_k):
+            if slot < len(local_indices):
+                idx = int(local_indices[slot])
+                obs.extend(self.vine_xy_norm[idx])
+            else:
+                obs.extend([0.0, 0.0])
+
+        # local vine z
+        for slot in range(self.local_vine_k):
+            if slot < len(local_indices):
+                idx = int(local_indices[slot])
+                obs.append(float(self.vine_z_norm[idx]))
+            else:
+                obs.append(0.0)
+
+        # collection point
+        obs.extend(self.collection_xy_norm)
+        obs.append(float(self.collection_z_norm))
+
+        # charging point
+        obs.extend(self.charging_xy_norm)
+        obs.append(float(self.charging_z_norm))
+
+        # local boxes remaining
+        for slot in range(self.local_vine_k):
+            if slot < len(local_indices):
+                idx = int(local_indices[slot])
+                v = self.vines[idx]
+                obs.append(v.boxes_remaining / max(self.max_boxes_actual, 1))
+            else:
+                obs.append(0.0)
+
+        # local queued boxes
+        for slot in range(self.local_vine_k):
+            if slot < len(local_indices):
+                idx = int(local_indices[slot])
+                v = self.vines[idx]
+                obs.append(v.queued_boxes / max(self.max_backlog, 1))
+            else:
+                obs.append(0.0)
+
         # === OWN STATE ===
-        
-        # Own position
+
         h_xyz = self._get_human_xyz(h)
         obs.extend(self._normalize_position(h.position))
         obs.append(self._normalize_z(h_xyz[2]))
-        
-        # Own fatigue
+
         obs.append(h.fatigue)
-        
-        # Own current action (one-hot)
+
         obs.extend(one_hot(h.current_action, self.num_actions))
-        
-        # Own has_box
+
         obs.append(1.0 if h.has_box else 0.0)
-        
-        # Own assigned_vine (one-hot)
-        obs.extend(one_hot(h.assigned_vine, self.num_vines))
-        
-        # === OTHER AGENTS' STATES ===
-        
+
+        # scalar instead of one-hot
+        obs.append(h.assigned_vine / max(self.num_vines - 1, 1))
+
+        # === OTHER HUMANS ===
+
         for other_idx, other_h in enumerate(self.humans):
             if other_idx != agent_idx:
                 other_xyz = self._get_human_xyz(other_h)
                 obs.extend(self._normalize_position(other_h.position))
                 obs.append(self._normalize_z(other_xyz[2]))
-        
+
         for other_idx, other_h in enumerate(self.humans):
             if other_idx != agent_idx:
-                # Other's has_box
                 obs.append(1.0 if other_h.has_box else 0.0)
-        
-        # === DRONE STATES ===
-        
+
+        # === DRONES ===
+
         for d in self.drones:
             d_xyz = self._get_drone_xyz(d)
             obs.extend(self._normalize_position(d.position))
             obs.append(self._normalize_z(d_xyz[2]))
-        
+
         for d in self.drones:
             obs.extend(one_hot(d.status, self.num_drone_status))
-        
+
         for d in self.drones:
             obs.append(1.0 if d.has_box else 0.0)
-            
+
         for d in self.drones:
             obs.append(d.battery / 100.0)
 
@@ -992,25 +1039,21 @@ class MultiAgentVineEnv(MultiAgentEnv):
         mask = np.ones(self.num_actions, dtype=np.float32)
 
         vine = self.vines[h.assigned_vine]
-        # invalid if already holding a box
+
         if h.has_box:
             mask[ACTION_HARVEST] = 0.0
         else:
-            # invalid if no boxes at vine
             if vine.boxes_remaining <= 0:
                 mask[ACTION_HARVEST] = 0.0
 
-        # invalid if no box
         if not h.has_box:
             mask[ACTION_TRANSPORT] = 0.0
             mask[ACTION_ENQUEUE] = 0.0
 
-        # invalid if queue full
         if h.has_box and vine.queued_boxes >= self.max_backlog:
             mask[ACTION_ENQUEUE] = 0.0
 
-        mask[ACTION_REST] = 1.0  # always vali
-
+        mask[ACTION_REST] = 1.0
 
         obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
         obs = np.clip(obs, 0.0, 1.0).astype(np.float32)
@@ -1020,7 +1063,6 @@ class MultiAgentVineEnv(MultiAgentEnv):
             "obs": obs,
             "action_mask": mask,
         }
-
 
     def render(self):
         """Render the environment."""

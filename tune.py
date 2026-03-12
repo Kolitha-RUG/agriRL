@@ -45,8 +45,8 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
-        print("MODEL obs_space:", obs_space)
-        print("MODEL original_space:", getattr(obs_space, "original_space", None))
+        # print("MODEL obs_space:", obs_space)
+        # print("MODEL original_space:", getattr(obs_space, "original_space", None))
 
         self.num_actions = int(action_space.n)
 
@@ -75,9 +75,9 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
 
 def env_creator(env_config):
     env = MultiAgentVineEnv(**env_config)
-    print("ENV FILE:", MultiAgentVineEnv.__module__)
-    print("OBS SPACE TYPE:", type(env.observation_space))
-    print("OBS SPACE:", env.observation_space)
+    # print("ENV FILE:", MultiAgentVineEnv.__module__)
+    # print("OBS SPACE TYPE:", type(env.observation_space))
+    # print("OBS SPACE:", env.observation_space)
     return env
 
 
@@ -97,10 +97,11 @@ if __name__ == "__main__":
         render_mode=None,
         topology_mode="row",
         vineyard_file=os.path.join(PROJECT_DIR, "data", "Vinha_Maria_Teresa_RL.xlsx"),
+        local_vine_k=6,
         num_humans=5,
         num_drones=2,
         max_boxes_per_vine=10,
-        max_steps=1000,
+        max_steps=500,
         max_backlog=10,
         dt=1.0,
         harvest_time=10.0,
@@ -128,10 +129,10 @@ if __name__ == "__main__":
         .training(
             gamma=0.99,
             lr=3e-4,
-            train_batch_size=4000,
+            train_batch_size=2000,
             model={
                 "custom_model": "torch_action_mask_model",
-                "fcnet_hiddens": [256, 256],
+                "fcnet_hiddens": [128, 64],
                 "fcnet_activation": "relu",
             },
         )
