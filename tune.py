@@ -101,7 +101,7 @@ if __name__ == "__main__":
         num_humans=5,
         num_drones=2,
         max_boxes_per_vine=10,
-        max_steps=500,
+        max_steps=200,
         max_backlog=10,
         dt=1.0,
         harvest_time=10.0,
@@ -125,7 +125,7 @@ if __name__ == "__main__":
 
         .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
         .environment(env="MultiAgentVine", env_config=env_config)
-        .env_runners(num_env_runners=6, num_envs_per_env_runner=1)
+        .env_runners(num_env_runners=10, num_envs_per_env_runner=5)
         .training(
             gamma=0.99,
             lr=3e-4,
@@ -152,7 +152,7 @@ if __name__ == "__main__":
         run_config=RunConfig(
             name="vineyard_ppo",
             storage_path=os.path.join(PROJECT_DIR, "ray_results_vine"),
-            stop={"training_iteration": 100},
+            stop={"training_iteration": 200},
         ),
     )
 

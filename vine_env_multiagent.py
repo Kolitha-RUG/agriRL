@@ -163,8 +163,10 @@ class MultiAgentVineEnv(MultiAgentEnv):
         self.human_speed = float(human_speed)
         self.drone_speed = float(drone_speed)
         self.vineyard_file = vineyard_file
-
+        self._base_df = self._load_vineyard(self.vineyard_file)
         self.local_vine_k = int(local_vine_k)
+
+        
 
         self.drone_flight_time_full = 16.0  # seconds (960)
         self.drone_batt_drain_rate = 100.0 / self.drone_flight_time_full  # % per second
@@ -182,7 +184,12 @@ class MultiAgentVineEnv(MultiAgentEnv):
 
 
         # Everything else stays the same from your original __init__
-        self.num_vines = compute_num_vines(self.topology_mode, self.vineyard_file)
+        if self.topology_mode == "full":
+            self.num_vines = len(self._base_df)
+        elif self.topology_mode == "row":
+            self.num_vines = int(self._base_df["lot"].nunique())
+        else:
+            raise ValueError(f"Unknown topology mode: {self.topology_mode}")
         self.num_actions = 4
         self.num_drone_status = 5
 
@@ -322,7 +329,8 @@ class MultiAgentVineEnv(MultiAgentEnv):
         super().reset(seed=seed)
         
         # Load vineyard data
-        df = self._load_vineyard(self.vineyard_file)
+        # Reuse cached vineyard data loaded once in __init__
+        df = self._base_df
         
         # Build vines based on topology mode
         if self.topology_mode == "full":
