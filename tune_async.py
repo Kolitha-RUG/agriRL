@@ -90,7 +90,7 @@ if __name__ == "__main__":
 
     ray.init(ignore_reinit_error=True)
 
-    register_env("MultiAgentVine", env_creator)
+    register_env("MultiAgentVineAsync", env_creator)
     ModelCatalog.register_custom_model("torch_action_mask_model", TorchActionMaskModel)
 
     env_config = dict(
@@ -152,7 +152,7 @@ if __name__ == "__main__":
         run_config=RunConfig(
             name="vineyard_ppo",
             storage_path=os.path.join(PROJECT_DIR, "ray_results_vine"),
-            stop={"training_iteration": 50},
+            stop={"training_iteration": 200},
         ),
     )
 
