@@ -48,19 +48,75 @@ def one_hot(idx: int, size: int) -> np.ndarray:
 
 
 class Vine:
-    """Represents a vine or row of vines in the vineyard."""
-    
-    def __init__(self, position: Tuple[float, float], max_boxes: int):
-        self.position = np.array(position, dtype=np.float32)
-        self.total_boxes = int(max_boxes)
-        self.boxes_remaining = int(max_boxes)
-        self.queued_boxes = 0
-        self.queue_contributors = deque() 
+    """
+    Represents a LINE work unit.
 
-    def harvest_box(self) -> bool:
-        """Remove 1 available box from the vine."""
-        if self.boxes_remaining > 0:
-            self.boxes_remaining -= 1
+    For now we keep the class name `Vine` to avoid a large refactor.
+    Semantically this now stores line-level harvest flow in kg.
+    """
+
+    def __init__(self, position: Tuple[float, float], total_kg: float, box_capacity_kg: float):
+        self.position = np.array(position, dtype=np.float32)
+
+        # Harvest stock
+        self.total_kg = float(total_kg)
+        self.kg_remaining = float(total_kg)
+
+        # Harvested material not yet sent out
+        self.kg_buffer = 0.0                  # harvested kg not yet converted into service units
+        self.box_capacity_kg = float(box_capacity_kg)
+
+        # Service units waiting at the line
+        self.boxes_ready = 0                  # full boxes ready for carry/enqueue
+        self.queued_boxes = 0                 # queued for drone pickup
+        self.queue_contributors = deque()
+
+        # Final partial-box simplification
+        self.final_partial_released = False
+        self.final_partial_box_kg = 0.0
+
+        # Useful for normalization / KPI summaries
+        self.total_boxes_equivalent = int(
+            np.ceil(self.total_kg / max(self.box_capacity_kg, 1e-6))
+        )
+
+    def add_harvested_kg(self, amount_kg: float) -> int:
+        """
+        Add harvested kg into the line buffer and convert it into ready boxes.
+
+        Returns:
+            number of newly created ready boxes
+        """
+        amount = float(np.clip(amount_kg, 0.0, self.kg_remaining))
+        self.kg_remaining -= amount
+        self.kg_buffer += amount
+
+        created = 0
+
+        # Full boxes
+        while self.kg_buffer + 1e-9 >= self.box_capacity_kg:
+            self.kg_buffer -= self.box_capacity_kg
+            self.boxes_ready += 1
+            created += 1
+
+        # Final partial box at line completion (Phase 4 simplification)
+        if (
+            self.kg_remaining <= 1e-9
+            and (not self.final_partial_released)
+            and self.kg_buffer > 1e-9
+        ):
+            self.boxes_ready += 1
+            self.final_partial_released = True
+            self.final_partial_box_kg = self.kg_buffer
+            self.kg_buffer = 0.0
+            created += 1
+
+        return created
+
+    def take_ready_box(self) -> bool:
+        """Worker takes one ready box from the line."""
+        if self.boxes_ready > 0:
+            self.boxes_ready -= 1
             return True
         return False
 
