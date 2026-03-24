@@ -62,13 +62,18 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
         )
 
     def forward(self, input_dict, state, seq_lens):
-        obs = input_dict["obs"]["obs"]
-        action_mask = input_dict["obs"]["action_mask"]
+        obs = input_dict["obs"]["obs"].float()
+        action_mask = input_dict["obs"]["action_mask"].float()
 
         logits, _ = self.internal_model({"obs": obs})
-        inf_mask = torch.clamp(torch.log(action_mask), min=FLOAT_MIN)
-        return logits + inf_mask, state
 
+        masked_logits = torch.where(
+            action_mask > 0.5,
+            logits,
+            torch.full_like(logits, -1e9),
+        )
+        return masked_logits, state
+    
     def value_function(self):
         return self.internal_model.value_function()
 
@@ -101,7 +106,7 @@ if __name__ == "__main__":
         num_humans=5,
         num_drones=2,
         max_boxes_per_vine=10,
-        max_steps=200,
+        max_steps=400,
         max_backlog=10,
         dt=1.0,
         harvest_time=10.0,
@@ -110,7 +115,11 @@ if __name__ == "__main__":
         reward_backlog_penalty= 0.05,
         reward_fatigue_inc_penalty = 1.5,
         reward_delivery=3,
-        reward_fatigue_level_penalty= 0.5
+        reward_fatigue_level_penalty= 2,
+
+        reward_harvest=0.02,                 # new
+        reward_enqueue=0.10,                 # new
+        reward_drone_credit=1.5              # new
     )
 
 # delivery weight: 0.2 / 0.12 = 1.67
@@ -128,7 +137,7 @@ if __name__ == "__main__":
         .env_runners(num_env_runners=10, num_envs_per_env_runner=5)
         .training(
             gamma=0.99,
-            lr=3e-4,
+            lr=2e-4,
             train_batch_size=2000,
             model={
                 "custom_model": "torch_action_mask_model",
