@@ -21,12 +21,21 @@ DRONE_GO_TO_CHARGE = 3
 DRONE_CHARGE = 4
 
 def compute_num_vines(topology_mode: str, vineyard_file: str) -> int:
-    """Compute number of vines based on topology mode."""
+    """
+    Compute number of work units based on topology mode.
+
+    full  -> one plant per point
+    line  -> one work unit per (lot, line)
+    row   -> legacy alias for line
+    """
     df = pd.read_excel(vineyard_file)
+
     if topology_mode == "full":
         return len(df)
-    elif topology_mode == "row":
-        return df["lot"].nunique()
+    elif topology_mode in ("line", "row"):
+        df["lot"] = df["lot"].astype(str).str.strip()
+        df["line"] = df["line"].astype(str).str.strip()
+        return int(df[["lot", "line"]].drop_duplicates().shape[0])
     else:
         raise ValueError(f"Unknown topology mode: {topology_mode}")
 
@@ -156,12 +165,12 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         self.max_boxes_per_vine = max_boxes_per_vine
         self.max_backlog = max_backlog
         self.max_steps = max_steps
-        self.dt = float(dt)
+        self.dt = float(dt) #seconds
         self.harvest_time = float(harvest_time)
         self.enqueue_time = float(enqueue_time)
         self.rest_time = float(rest_time)
-        self.human_speed = float(human_speed)
-        self.drone_speed = float(drone_speed)
+        self.human_speed = float(human_speed) #m/s
+        self.drone_speed = float(drone_speed) #m/s
         self.vineyard_file = vineyard_file
         self._base_df = self._load_vineyard(self.vineyard_file)
         self.local_vine_k = int(local_vine_k)
@@ -182,12 +191,10 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         self.reward_fatigue_level_penalty = float(reward_fatigue_level_penalty)
 
 
-
-        # Everything else stays the same from your original __init__
         if self.topology_mode == "full":
             self.num_vines = len(self._base_df)
-        elif self.topology_mode == "row":
-            self.num_vines = int(self._base_df["lot"].nunique())
+        elif self.topology_mode in ("line", "row"):
+            self.num_vines = int(self._base_df[["lot", "line"]].drop_duplicates().shape[0])
         else:
             raise ValueError(f"Unknown topology mode: {self.topology_mode}")
         self.num_actions = 4
@@ -269,13 +276,38 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         self._clock = None
 
     def _load_vineyard(self, file_path: str) -> pd.DataFrame:
-        """Load vineyard data from Excel file."""
-        df = pd.read_excel(file_path)
-        df["x"] = df["x"] / 1000.0
-        df["y"] = df["y"] / 1000.0
-        df["z"] = df["z"] / 1000.0
-        df["x"] -= df["x"].min()
-        df["y"] -= df["y"].min()
+        """
+        Load vineyard data from Excel file.
+
+        Assumptions for Phase 2:
+        - x, y, z are already in meters
+        - keep real metric scale
+        - shift x and y so the map starts at (0, 0)
+        - keep z in real elevation meters
+        """
+        df = pd.read_excel(file_path).copy()
+
+        required_cols = {"lot", "line", "x", "y", "z"}
+        missing = required_cols - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing required columns in vineyard file: {missing}")
+
+        df["lot"] = df["lot"].astype(str).str.strip()
+        df["line"] = df["line"].astype(str).str.strip()
+
+        df["x"] = pd.to_numeric(df["x"], errors="coerce")
+        df["y"] = pd.to_numeric(df["y"], errors="coerce")
+        df["z"] = pd.to_numeric(df["z"], errors="coerce")
+
+        df = df.dropna(subset=["lot", "line", "x", "y", "z"]).reset_index(drop=True)
+
+        # IMPORTANT: keep metric units, do NOT divide by 1000
+        df["x"] = df["x"] - df["x"].min()
+        df["y"] = df["y"] - df["y"].min()
+
+        # Repeated line IDs only make sense inside a lot
+        df["line_key"] = df["lot"] + "::" + df["line"]
+
         return df
 
     def _build_full_vines(self, df: pd.DataFrame) -> List[Vine]:
@@ -289,24 +321,74 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
             vines.append(v)
         return vines
 
-    def _build_row_vines(self, df: pd.DataFrame) -> List[Vine]:
-        """Build vines in row topology mode (one vine per lot/row)."""
+    def _build_line_vines(self, df: pd.DataFrame) -> List[Vine]:
+        """
+        Build work units in line topology mode:
+        one unit per unique (lot, line).
+
+        NOTE:
+        We keep the existing variable name `vines` for now to avoid a huge refactor.
+        Semantically, each `Vine` object below is actually a LINE work unit.
+        """
         vines = []
-        grouped = df.groupby("lot")
-        
-        for lot_id, g in grouped:
-            x_mean = g["x"].mean()
-            y_mean = g["y"].mean()
-            z_mean = g["z"].mean()
-            total_boxes = len(g) * self.max_boxes_per_vine
-            
-            v = Vine(position=(x_mean, y_mean), max_boxes=total_boxes)
+
+        grouped = df.groupby(["lot", "line"], sort=True)
+
+        for (lot_id, line_id), g in grouped:
+            g = g.sort_values(["y", "x"]).reset_index(drop=True)
+
+            xy = g[["x", "y"]].to_numpy(dtype=np.float32)
+            start_xy = xy[0]
+            end_xy = xy[-1]
+            centroid_xy = xy.mean(axis=0)
+
+            z_mean = float(g["z"].mean())
+            line_length_m = float(np.linalg.norm(end_xy - start_xy))
+            n_plants = int(len(g))
+
+            # TEMPORARY:
+            # keep old box abstraction alive for now
+            total_boxes = n_plants * self.max_boxes_per_vine
+
+            v = Vine(position=(float(centroid_xy[0]), float(centroid_xy[1])), max_boxes=total_boxes)
+
             v.lot = lot_id
+            v.line = line_id
+            v.line_key = f"{lot_id}::{line_id}"
+
             v.z = z_mean
-            v.n_vines = len(g)
+            v.n_plants = n_plants
+            v.line_length_m = line_length_m
+            v.start_position = np.array(start_xy, dtype=np.float32)
+            v.end_position = np.array(end_xy, dtype=np.float32)
+
             vines.append(v)
-            
+
         return vines
+    
+    def _build_lot_metadata(self) -> None:
+        """
+        Build lot-level metadata from the current line work units.
+        This prepares for one handover point per lot in the next phase.
+        """
+        self.lot_to_vine_indices = {}
+        self.lot_handover_points = {}
+
+        for idx, v in enumerate(self.vines):
+            self.lot_to_vine_indices.setdefault(v.lot, []).append(idx)
+
+        for lot_id, indices in self.lot_to_vine_indices.items():
+            pts = np.array([self.vines[i].position for i in indices], dtype=np.float32)
+            zs = np.array([self.vines[i].z for i in indices], dtype=np.float32)
+
+            handover_xy = pts.mean(axis=0)
+            handover_z = float(zs.mean())
+
+            self.lot_handover_points[lot_id] = {
+                "position": handover_xy.astype(np.float32),
+                "z": handover_z,
+                "line_indices": indices,
+            }
     
     def _find_next_vine(self, from_pos: np.ndarray, exclude_vines: Optional[set] = None,) -> Optional[int]:
         if exclude_vines is None:
@@ -342,10 +424,13 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         # Build vines based on topology mode
         if self.topology_mode == "full":
             self.vines = self._build_full_vines(df)
-        elif self.topology_mode == "row":
-            self.vines = self._build_row_vines(df)
+        elif self.topology_mode in ("line", "row"):
+            self.vines = self._build_line_vines(df)
         else:
             raise ValueError(f"Unknown topology_mode: {self.topology_mode}")
+
+        # Build lot-level metadata for later handover-point logic
+        self._build_lot_metadata()
         
         xs = np.array([v.position[0] for v in self.vines], dtype=np.float32)
         ys = np.array([v.position[1] for v in self.vines], dtype=np.float32)
@@ -1109,7 +1194,11 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         """Text-based rendering to terminal."""
         print(f"Step {self.steps} | delivered={self.delivered}")
         for i, v in enumerate(self.vines):
-            print(f"  Vine {i}: rem={v.boxes_remaining} queued={v.queued_boxes}")
+            print(
+                f"  Line {i}: lot={getattr(v, 'lot', '?')} "
+                f"line={getattr(v, 'line', '?')} "
+                f"rem={v.boxes_remaining} queued={v.queued_boxes}"
+            )
         for i, h in enumerate(self.humans):
             agent_id = f"human_{i}"
             print(f"  {agent_id}: vine={h.assigned_vine} busy={h.busy} "
@@ -1218,16 +1307,16 @@ def test_environment():
     """Test the Multi-Agent Vine Environment."""
     env = MultiAgentVineEnvAsync(
         render_mode="human",
-        topology_mode="row",
+        topology_mode="line",
         num_humans=5,
         num_drones=1,
-        max_boxes_per_vine=0.01,
+        max_boxes_per_vine=1,
         max_backlog=5,
         max_steps=5000,
-        dt=1.0,
-        harvest_time=5.0,
-        human_speed=0.5,
-        drone_speed=1.0,
+        dt=5.0,
+        harvest_time=30.0,
+        human_speed=1.0,
+        drone_speed=5.0,
         vineyard_file="data/Vinha_Maria_Teresa_RL.xlsx",
     )
 
