@@ -128,7 +128,10 @@ class Human:
         self.position = np.array(position, dtype=np.float32)
         self.assigned_vine = int(assigned_vine)
         self.fatigue = 0.0
+
+        # Still keep this name for minimal refactor:
         self.has_box = False
+        self.carried_box_kg = 0.0
 
         self.current_action = ACTION_HARVEST
         self.busy = False
@@ -136,7 +139,8 @@ class Human:
         self.delivered_count = 0
         self.transport_fatigue_multiplier = 1.0
 
-
+        # Phase 3: kg produced by the currently running harvest action
+        self.pending_harvest_kg = 0.0
 class Drone:
     """Represents a drone agent."""
     
