@@ -20,6 +20,21 @@ DRONE_DELIVER = 2
 DRONE_GO_TO_CHARGE = 3
 DRONE_CHARGE = 4
 
+
+DEFAULT_HANDOVER_POINTS_XY = [
+    (48.548, 59.740),
+    (83.632, 76.301),
+    (122.336, 81.086),
+    (36.096, 165.033),
+    (73.253, 171.914),
+    (114.117, 173.284),
+    (26.728, 260.673),
+    (69.043, 271.251),
+    (112.451, 259.898),
+    (149.760, 280.885),
+    (63.016, 354.571),
+]
+
 def compute_num_vines(topology_mode: str, vineyard_file: str) -> int:
     """
     Compute number of work units based on topology mode.
@@ -192,6 +207,7 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
 
     def __init__(
         self,
+        handover_points_xy: Optional[List[Tuple[float, float]]] = None,
         render_mode: str = "terminal",
         topology_mode: str = "line",
         num_humans: int = 2,
@@ -240,6 +256,12 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         self.vineyard_file = vineyard_file
         self._base_df = self._load_vineyard(self.vineyard_file)
         self.local_vine_k = int(local_vine_k)
+
+        self.handover_points_xy = (
+                list(handover_points_xy)
+                if handover_points_xy is not None
+                else list(DEFAULT_HANDOVER_POINTS_XY)
+            )
 
         self.rest_fatigue_threshold = 0.6
 
@@ -440,29 +462,53 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
 
         return vines
     
-    def _build_lot_metadata(self) -> None:
+    def _build_handover_points(self) -> None:
         """
-        Build lot-level metadata from the current line work units.
-        This prepares for one handover point per lot in the next phase.
+        Build designated handover points from manually selected XY coordinates.
+
+        For each handover point:
+        - keep the given XY
+        - estimate Z from the nearest line centroid
+        - initialize queue state
+
+        For each line:
+        - assign nearest handover point automatically
         """
-        self.lot_to_vine_indices = {}
-        self.lot_handover_points = {}
+        self.handover_points = []
 
-        for idx, v in enumerate(self.vines):
-            self.lot_to_vine_indices.setdefault(v.lot, []).append(idx)
+        if len(self.vines) == 0:
+            return
 
-        for lot_id, indices in self.lot_to_vine_indices.items():
-            pts = np.array([self.vines[i].position for i in indices], dtype=np.float32)
-            zs = np.array([self.vines[i].z for i in indices], dtype=np.float32)
+        line_xy = np.array([v.position for v in self.vines], dtype=np.float32)
+        line_z = np.array([v.z for v in self.vines], dtype=np.float32)
 
-            handover_xy = pts.mean(axis=0)
-            handover_z = float(zs.mean())
+        # 1) Create handover nodes
+        for hid, (x, y) in enumerate(self.handover_points_xy):
+            hp_xy = np.array([x, y], dtype=np.float32)
 
-            self.lot_handover_points[lot_id] = {
-                "position": handover_xy.astype(np.float32),
-                "z": handover_z,
-                "line_indices": indices,
-            }
+            # nearest line -> use its z as handover z
+            dists = np.linalg.norm(line_xy - hp_xy, axis=1)
+            nearest_idx = int(np.argmin(dists))
+            hp_z = float(line_z[nearest_idx])
+
+            self.handover_points.append({
+                "id": hid,
+                "position": hp_xy,
+                "z": hp_z,
+                "queued_boxes": 0,
+                "queue_contributors": deque(),
+                "line_indices": [],
+            })
+
+    # 2) Assign each line to the nearest handover node
+    for line_idx, v in enumerate(self.vines):
+        hp_positions = np.array([hp["position"] for hp in self.handover_points], dtype=np.float32)
+        dists = np.linalg.norm(hp_positions - v.position, axis=1)
+        nearest_hid = int(np.argmin(dists))
+
+        v.handover_id = nearest_hid
+        self.handover_points[nearest_hid]["line_indices"].append(line_idx)
+
     def _line_has_open_harvest(self, v: Vine) -> bool:
         return v.kg_remaining > 1e-9
 
@@ -520,9 +566,10 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
             self.vines = self._build_line_vines(df)
         else:
             raise ValueError(f"Unknown topology_mode: {self.topology_mode}")
+        
 
-        # Build lot-level metadata for later handover-point logic
-        self._build_lot_metadata()
+        # Build designated handover points and assign each line to the nearest one
+        self._build_handover_points()
         
         xs = np.array([v.position[0] for v in self.vines], dtype=np.float32)
         ys = np.array([v.position[1] for v in self.vines], dtype=np.float32)
@@ -1164,6 +1211,10 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         dxy = float(np.linalg.norm(end_xyz[:2] - start_xyz[:2]))
         dz = float(end_xyz[2] - start_xyz[2])
         return abs(dz) / max(dxy, 1e-6)
+    
+    def _get_handover_xyz(self, handover_id: int) -> np.ndarray:
+        hp = self.handover_points[handover_id]
+        return np.array([hp["position"][0], hp["position"][1], hp["z"]], dtype=np.float32)
 
     def _human_transport_costs(self, start_xyz: np.ndarray, end_xyz: np.ndarray) -> Tuple[float, float]:
         """
@@ -1347,6 +1398,16 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
                 f"ready={v.boxes_ready} "
                 f"queued={v.queued_boxes}"
             )
+
+        print("Handover points:")
+        for hp in self.handover_points:
+            print(
+                f"  HP {hp['id']}: "
+                f"xy=({hp['position'][0]:.2f}, {hp['position'][1]:.2f}) "
+                f"z={hp['z']:.2f} "
+                f"queued={hp['queued_boxes']} "
+                f"n_lines={len(hp['line_indices'])}"
+            )
         for i, h in enumerate(self.humans):
             agent_id = f"human_{i}"
             print(f"  {agent_id}: vine={h.assigned_vine} busy={h.busy} "
@@ -1354,6 +1415,15 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         for i, d in enumerate(self.drones):
             print(f"  Drone {i}: status={d.status} busy={d.busy} "
                   f"t={d.time_left:.1f} bat={d.battery:.1f}")
+        for i, v in enumerate(self.vines):
+            print(
+                f"  Line {i}: lot={getattr(v, 'lot', '?')} "
+                f"line={getattr(v, 'line', '?')} "
+                f"hp={getattr(v, 'handover_id', -1)} "
+                f"kg_rem={v.kg_remaining:.2f} "
+                f"ready={v.boxes_ready} "
+                f"queued={v.queued_boxes}"
+            )
         print("=" * 60)
 
     def _render_pygame(self):
