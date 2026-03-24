@@ -100,24 +100,25 @@ if __name__ == "__main__":
 
     env_config = dict(
         render_mode=None,
-        topology_mode="row",
+        topology_mode="line",
         vineyard_file=os.path.join(PROJECT_DIR, "data", "Vinha_Maria_Teresa_RL.xlsx"),
         local_vine_k=6,
         num_humans=5,
         num_drones=2,
-        max_boxes_per_vine=10,
-        max_steps=500,
+        yield_per_plant_kg=0.6,
+        box_capacity_kg=8.0,
+        harvest_rate_kg_s=0.004,
+        max_steps=1200,
         max_backlog=10,
-        dt=1.0,
-        harvest_time=10.0,
-        human_speed=0.2,
-        drone_speed=1.0,
-        reward_backlog_penalty= 0.05,
-        reward_fatigue_inc_penalty = 1.5,
+        dt=5.0,
+        harvest_time=300.0,
+        human_speed=1.0,
+        drone_speed=5.0,
+        reward_backlog_penalty=0.05,
+        reward_fatigue_inc_penalty=1.5,
         reward_delivery=3,
-        reward_fatigue_level_penalty= 2
+        reward_fatigue_level_penalty=2,
     )
-
 # delivery weight: 0.2 / 0.12 = 1.67
 
 # fatigue increase weight: 0.2 / 0.08 = 2.5

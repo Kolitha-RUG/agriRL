@@ -55,7 +55,9 @@ class Vine:
     Semantically this now stores line-level harvest flow in kg.
     """
 
-    def __init__(self, position: Tuple[float, float], total_kg: float, box_capacity_kg: float):
+    def __init__(self, 
+                 
+        position: Tuple[float, float], total_kg: float, box_capacity_kg: float):
         self.position = np.array(position, dtype=np.float32)
 
         # Harvest stock
@@ -191,7 +193,7 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
     def __init__(
         self,
         render_mode: str = "terminal",
-        topology_mode: str = "row",
+        topology_mode: str = "line",
         num_humans: int = 2,
         num_drones: int = 1,
         yield_per_plant_kg: float = 0.6,
@@ -199,12 +201,12 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         harvest_rate_kg_s: float = 0.004,
         max_backlog: int = 10,
         max_steps: int = 2000,
-        dt: float = 1.0,
-        harvest_time: float = 10.0,
+        dt: float = 5.0,
+        harvest_time: float = 300.0,
         enqueue_time: float = 1.0,
         rest_time: float = 5.0,
-        human_speed: float = 0.3,
-        drone_speed: float = 1.0,
+        human_speed: float = 1.0,
+        drone_speed: float = 5.0,
         vineyard_file: str = "data/Vinha_Maria_Teresa_RL.xlsx",
         local_vine_k: int = 6,
         reward_delivery: float = 1.0,
@@ -791,49 +793,6 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
                 h.busy = True
                 h.time_left = self.rest_time
 
-            can_do_productive = can_harvest or can_transport or can_enqueue
-            can_rest = (h.fatigue >= self.rest_fatigue_threshold) or (not can_do_productive)
-
-            if a == ACTION_REST and not can_rest:
-                continue
-
-            if a != ACTION_REST and not can_do_productive:
-                continue
-
-            if a == ACTION_HARVEST:
-                if (not h.has_box) and vine.boxes_remaining > 0:
-                    ok = vine.harvest_box()
-                    if ok:
-                        harvest_events[i] += 1
-                        h.busy = True
-                        fatigue_slowdown = 1.0 + 0.8 * h.fatigue
-                        h.time_left = self.harvest_time * fatigue_slowdown
-                        h.position = vine.position.copy()
-                        
-            elif a == ACTION_ENQUEUE:
-                if h.has_box and vine.queued_boxes < self.max_backlog:
-                    
-                    vine.queued_boxes += 1
-                    vine.queue_contributors.append(i)
-                    enqueue_events[i] += 1
-                    h.busy = True
-                    h.time_left = self.enqueue_time
-                    h.has_box = False
-                    h.position = vine.position.copy()
-                    
-            elif a == ACTION_TRANSPORT:
-                if h.has_box:
-                    start_xyz = self._get_human_xyz(h)
-                    end_xyz = self._get_collection_xyz()
-                    travel_time, fatigue_multiplier = self._human_transport_costs(start_xyz, end_xyz)
-
-                    h.busy = True
-                    h.time_left = travel_time
-                    h.transport_fatigue_multiplier = fatigue_multiplier
-
-            elif a == ACTION_REST:
-                h.busy = True
-                h.time_left = self.rest_time # Fixed rest time
         fatigue_after = [h.fatigue for h in self.humans]
         fatigue_increase = [max(0.0, fa - fb) for fa, fb in zip(fatigue_after, fatigue_before)]
         # 3) Progress drone timers
@@ -1029,14 +988,16 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         # for episode-level logging
         self.ep_reward_sum += float(np.mean(list(step_rewards.values())))
 
-        remaining_boxes = int(sum(v.boxes_remaining for v in self.vines))
+        remaining_harvest_kg = float(sum(v.kg_remaining for v in self.vines))
+        remaining_ready_boxes = int(sum(v.boxes_ready for v in self.vines))
         remaining_queue = int(sum(v.queued_boxes for v in self.vines))
 
-        # Check termination conditions
-
-        all_harvested = all(v.boxes_remaining == 0 for v in self.vines)
+        all_harvested = all((v.kg_remaining <= 1e-9) and (v.boxes_ready == 0) for v in self.vines)
         no_queue = all(v.queued_boxes == 0 for v in self.vines)
-        terminated = bool(all_harvested and no_queue)
+        no_human_boxes = all(not h.has_box for h in self.humans)
+        no_drone_boxes = all(not d.has_box for d in self.drones)
+
+        terminated = bool(all_harvested and no_queue and no_human_boxes and no_drone_boxes)
         truncated = bool(self.steps >= self.max_steps)
 
         summary = {}
@@ -1052,12 +1013,24 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
             delivered_total = int(self.ep_delivered_total)
             throughput_per_100 = 100.0 * delivered_total / steps
 
-            remaining_carried = int(sum(1 for h in self.humans if h.has_box))
-            total_initial_boxes = max(1, int(sum(v.max_boxes for v in self.vines)))
+            remaining_human_carried = int(sum(1 for h in self.humans if h.has_box))
+            remaining_drone_carried = int(sum(1 for d in self.drones if d.has_box))
+
+            remaining_unharvested_box_equiv = int(
+                np.ceil(remaining_harvest_kg / max(self.box_capacity_kg, 1e-6))
+            )
+
+            total_initial_boxes = max(1, int(self.initial_total_boxes))
             delivered_pct = 100.0 * delivered_total / total_initial_boxes
+
             remaining_work_pct = 100.0 * (
-            remaining_boxes + remaining_queue + remaining_carried
-            ) / max(1, self.initial_total_boxes)
+                remaining_unharvested_box_equiv
+                + remaining_ready_boxes
+                + remaining_queue
+                + remaining_human_carried
+                + remaining_drone_carried
+            ) / total_initial_boxes
+
             completion_pct = 100.0 - remaining_work_pct
 
             human_total_steps = max(1, self.num_humans * steps)
@@ -1256,21 +1229,22 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         obs.extend(self.charging_xy_norm)
         obs.append(float(self.charging_z_norm))
 
-        # local boxes remaining
+        # local kg remaining
         for slot in range(self.local_vine_k):
             if slot < len(local_indices):
                 idx = int(local_indices[slot])
                 v = self.vines[idx]
-                obs.append(v.boxes_remaining / max(self.max_boxes_actual, 1))
+                obs.append(v.kg_remaining / max(self.max_line_kg_actual, 1e-6))
             else:
                 obs.append(0.0)
 
-        # local queued boxes
+        # local service units = ready + queued
         for slot in range(self.local_vine_k):
             if slot < len(local_indices):
                 idx = int(local_indices[slot])
                 v = self.vines[idx]
-                obs.append(v.queued_boxes / max(self.max_backlog, 1))
+                service_units = v.boxes_ready + v.queued_boxes
+                obs.append(service_units / max(self.max_boxes_equivalent_actual, 1))
             else:
                 obs.append(0.0)
 
@@ -1320,19 +1294,19 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         obs = np.array(obs, dtype=np.float32)
         mask = np.ones(self.num_actions, dtype=np.float32)
 
-        vine = self.vines[h.assigned_vine]
+        line = self.vines[h.assigned_vine]
 
-        if h.has_box:
+        can_harvest = (not h.has_box) and (line.kg_remaining > 1e-9)
+        can_take_ready_box = (not h.has_box) and (line.boxes_ready > 0)
+
+        if not can_harvest:
             mask[ACTION_HARVEST] = 0.0
-        else:
-            if vine.boxes_remaining <= 0:
-                mask[ACTION_HARVEST] = 0.0
 
-        if not h.has_box:
+        if not (h.has_box or can_take_ready_box):
             mask[ACTION_TRANSPORT] = 0.0
             mask[ACTION_ENQUEUE] = 0.0
 
-        if h.has_box and vine.queued_boxes >= self.max_backlog:
+        if (h.has_box or can_take_ready_box) and line.queued_boxes >= self.max_backlog:
             mask[ACTION_ENQUEUE] = 0.0
 
         can_do_productive = bool(
@@ -1369,7 +1343,9 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
             print(
                 f"  Line {i}: lot={getattr(v, 'lot', '?')} "
                 f"line={getattr(v, 'line', '?')} "
-                f"rem={v.boxes_remaining} queued={v.queued_boxes}"
+                f"kg_rem={v.kg_remaining:.2f} "
+                f"ready={v.boxes_ready} "
+                f"queued={v.queued_boxes}"
             )
         for i, h in enumerate(self.humans):
             agent_id = f"human_{i}"
@@ -1422,11 +1398,22 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         pygame.draw.rect(self._screen, (138, 43, 226), (chp[0]-8, chp[1]-8, 16, 16))
         
         # Vines (green)
+        # Lines (green)
+        font = pygame.font.SysFont(None, 18)
+
         for v in self.vines:
             x, y = world_to_screen(v.position)
-            pygame.draw.rect(self._screen, (34, 139, 34), (x, y, 10, 10))
-            font = pygame.font.SysFont(None, 18)
-            text_str = f"{v.boxes_remaining}_{v.queued_boxes}"
+
+            # Optional visual cue: darker if finished
+            if v.kg_remaining <= 1e-9 and v.boxes_ready == 0 and v.queued_boxes == 0:
+                color = (120, 120, 120)
+            else:
+                color = (34, 139, 34)
+
+            pygame.draw.rect(self._screen, color, (x, y, 10, 10))
+
+            # Show new Phase 3–4 state
+            text_str = f"{v.kg_remaining:.1f}kg | r{v.boxes_ready} | q{v.queued_boxes}"
             text_surf = font.render(text_str, True, TEXT_COLOR)
             self._screen.blit(text_surf, (x + 12, y - 10))
 
@@ -1482,11 +1469,13 @@ def test_environment():
         topology_mode="line",
         num_humans=5,
         num_drones=1,
-        max_boxes_per_vine=1,
+        yield_per_plant_kg=0.6,     # placeholder scenario value
+        box_capacity_kg=8.0,        # placeholder scenario value
+        harvest_rate_kg_s=0.004,    # placeholder; calibrate later from productivity
         max_backlog=5,
         max_steps=5000,
         dt=5.0,
-        harvest_time=30.0,
+        harvest_time=300.0,         # 5 min harvest cycle
         human_speed=1.0,
         drone_speed=5.0,
         vineyard_file="data/Vinha_Maria_Teresa_RL.xlsx",
