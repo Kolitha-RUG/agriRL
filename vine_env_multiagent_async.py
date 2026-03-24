@@ -140,7 +140,7 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         reward_backlog_penalty: float = 0.5,
         reward_fatigue_inc_penalty: float = 0.8,
         reward_harvest: float = 0.08,
-        reward_enqueue: float = 0.05,
+        reward_enqueue: float = 0.10,
         reward_drone_credit: float = 1.0,
         reward_fatigue_level_penalty: float = 2.0
 
@@ -166,7 +166,7 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         self._base_df = self._load_vineyard(self.vineyard_file)
         self.local_vine_k = int(local_vine_k)
 
-        
+        self.rest_fatigue_threshold = 0.6
 
         self.drone_flight_time_full = 16.0  # seconds (960)
         self.drone_batt_drain_rate = 100.0 / self.drone_flight_time_full  # % per second
@@ -350,7 +350,8 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         xs = np.array([v.position[0] for v in self.vines], dtype=np.float32)
         ys = np.array([v.position[1] for v in self.vines], dtype=np.float32)
         zs = np.array([v.z for v in self.vines], dtype=np.float32)
-
+        # after vines/humans/drones are initialized
+        
         self.x_min = float(xs.min())
         self.y_min = float(ys.min())
         self.z_min = float(zs.min())
@@ -388,7 +389,7 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         self.charging_z_norm = np.float32(self._normalize_z(self.charging_z))
 
         self.max_boxes_actual = max(v.total_boxes for v in self.vines) if self.vines else 1
-
+        self.initial_total_boxes = int(sum(v.boxes_remaining for v in self.vines))
         # Initialize counters
         self.steps = 0
         self.delivered = 0
@@ -485,7 +486,7 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
                     fatigue_rate = self.human_transport_fatigue_rate * mult
                     h.fatigue = float(np.clip(h.fatigue + fatigue_rate * self.dt, 0.0, 1.0))
                 elif h.current_action == ACTION_REST:
-                    h.fatigue = float(np.clip(h.fatigue - 0.35 * self.dt, 0.0, 1.0))
+                    h.fatigue = float(np.clip(h.fatigue - 0.2 * self.dt, 0.0, 1.0))
                 
                 if h.time_left <= 0.0:
                     h.busy = False
@@ -529,11 +530,18 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
             a = int(a)
             h.current_action = a
 
-            # Allow REST regardless of local work.
-            if a != ACTION_REST:
-                has_work = (vine.boxes_remaining > 0 or h.has_box)
-                if not has_work:
-                    continue
+            can_harvest = (not h.has_box) and (vine.boxes_remaining > 0)
+            can_transport = h.has_box
+            can_enqueue = h.has_box and (vine.queued_boxes < self.max_backlog)
+
+            can_do_productive = can_harvest or can_transport or can_enqueue
+            can_rest = (h.fatigue >= self.rest_fatigue_threshold) or (not can_do_productive)
+
+            if a == ACTION_REST and not can_rest:
+                continue
+
+            if a != ACTION_REST and not can_do_productive:
+                continue
 
             if a == ACTION_HARVEST:
                 if (not h.has_box) and vine.boxes_remaining > 0:
@@ -728,33 +736,33 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         # -----------------------------
         backlog_norm = float(backlog_total) / max(1, self.num_vines * self.max_backlog)
 
-        # penalize only high fatigue, not all fatigue
         fatigue_excess = float(np.mean([max(0.0, h.fatigue - 0.6) for h in self.humans]))
 
         r_delivery = self.reward_delivery * float(delivered_delta)
-        r_fat_inc = - self.reward_fatigue_inc_penalty * fatigue_total
-        r_backlog = - self.reward_backlog_penalty * backlog_norm
-        r_fat_lvl = - self.reward_fatigue_level_penalty * fatigue_excess
+        r_fat_inc = -self.reward_fatigue_inc_penalty * fatigue_total
+        r_backlog = -self.reward_backlog_penalty * backlog_norm
+        r_fat_lvl = -self.reward_fatigue_level_penalty * fatigue_excess
 
         team_reward = r_delivery + r_fat_inc + r_backlog + r_fat_lvl
 
-        # accumulate episode sums using team terms
         self.ep_r_delivery_sum += float(r_delivery)
         self.ep_r_fatigue_inc_sum += float(r_fat_inc)
         self.ep_r_backlog_sum += float(r_backlog)
         self.ep_r_fatigue_level_sum += float(r_fat_lvl)
 
-        # -----------------------------
-        # HYBRID TEAM + LOCAL REWARD
-        # -----------------------------
-        lambda_team = 0.75
+        lambda_team = 0.60
         step_rewards = {}
 
         for i, agent_id in enumerate(self.possible_agents):
+            fatigue_excess_i = max(0.0, self.humans[i].fatigue - 0.6)
+
             local_reward = (
                 self.reward_delivery * float(individual_deliveries[i])
                 + self.reward_harvest * float(harvest_events[i])
+                + self.reward_enqueue * float(enqueue_events[i])
+                + self.reward_drone_credit * float(drone_credit_deliveries[i])
                 - self.reward_fatigue_inc_penalty * float(fatigue_increase[i])
+                - self.reward_fatigue_level_penalty * float(fatigue_excess_i)
             )
 
             agent_reward = lambda_team * team_reward + (1.0 - lambda_team) * local_reward
@@ -764,12 +772,13 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         # for episode-level logging
         self.ep_reward_sum += float(np.mean(list(step_rewards.values())))
 
-
+        remaining_boxes = int(sum(v.boxes_remaining for v in self.vines))
+        remaining_queue = int(sum(v.queued_boxes for v in self.vines))
 
         # Check termination conditions
+
         all_harvested = all(v.boxes_remaining == 0 for v in self.vines)
         no_queue = all(v.queued_boxes == 0 for v in self.vines)
-
         terminated = bool(all_harvested and no_queue)
         truncated = bool(self.steps >= self.max_steps)
 
@@ -786,6 +795,14 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
             delivered_total = int(self.ep_delivered_total)
             throughput_per_100 = 100.0 * delivered_total / steps
 
+            remaining_carried = int(sum(1 for h in self.humans if h.has_box))
+            total_initial_boxes = max(1, int(sum(v.max_boxes for v in self.vines)))
+            delivered_pct = 100.0 * delivered_total / total_initial_boxes
+            remaining_work_pct = 100.0 * (
+            remaining_boxes + remaining_queue + remaining_carried
+            ) / max(1, self.initial_total_boxes)
+            completion_pct = 100.0 - remaining_work_pct
+
             human_total_steps = max(1, self.num_humans * steps)
             rest_ratio = self.ep_human_rest_steps / human_total_steps
             human_util = self.ep_human_busy_steps / human_total_steps
@@ -799,6 +816,9 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
                 "kpi_mean_backlog": float(mean_backlog),
                 "kpi_peak_backlog": peak_backlog,
                 "kpi_rest_ratio": float(rest_ratio),
+                "kpi_delivered_pct": float(delivered_pct),
+                "kpi_remaining_work_pct": float(remaining_work_pct),
+                "kpi_completion_pct": float(completion_pct),
                 "kpi_human_utilization": float(human_util),
                 "kpi_drone_utilization": float(drone_util),
                 "episode_fatigue_increase_total": float(self.ep_fatigue_increase_total),
@@ -1058,7 +1078,16 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         if h.has_box and vine.queued_boxes >= self.max_backlog:
             mask[ACTION_ENQUEUE] = 0.0
 
-        mask[ACTION_REST] = 1.0
+        can_do_productive = bool(
+            (mask[ACTION_HARVEST] > 0.0)
+            or (mask[ACTION_TRANSPORT] > 0.0)
+            or (mask[ACTION_ENQUEUE] > 0.0)
+        )
+
+        if h.fatigue >= self.rest_fatigue_threshold or not can_do_productive:
+            mask[ACTION_REST] = 1.0
+        else:
+            mask[ACTION_REST] = 0.0
 
         obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
         obs = np.clip(obs, 0.0, 1.0).astype(np.float32)
