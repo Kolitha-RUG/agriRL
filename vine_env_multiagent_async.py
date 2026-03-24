@@ -194,7 +194,9 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         topology_mode: str = "row",
         num_humans: int = 2,
         num_drones: int = 1,
-        max_boxes_per_vine: int = 10,
+        yield_per_plant_kg: float = 0.6,
+        box_capacity_kg: float = 8.0,
+        harvest_rate_kg_s: float = 0.004,
         max_backlog: int = 10,
         max_steps: int = 2000,
         dt: float = 1.0,
@@ -222,7 +224,9 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         self.topology_mode = topology_mode
         self.num_humans = num_humans
         self.num_drones = num_drones
-        self.max_boxes_per_vine = max_boxes_per_vine
+        self.yield_per_plant_kg = float(yield_per_plant_kg)
+        self.box_capacity_kg = float(box_capacity_kg)
+        self.harvest_rate_kg_s = float(harvest_rate_kg_s)
         self.max_backlog = max_backlog
         self.max_steps = max_steps
         self.dt = float(dt) #seconds
@@ -272,8 +276,8 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
                     + 1                                # collection point z
                     + 2                                # charging point x,y
                     + 1                                # charging point z
-                    + self.local_vine_k                # local boxes_remaining
-                    + self.local_vine_k                # local queued_boxes
+                    + self.local_vine_k                # local kg_remaining
+                    + self.local_vine_k                # local service units (ready + queued)
                     + 2                                # own x,y position
                     + 1                                # own z position
                     + 1                                # fatigue
@@ -371,14 +375,21 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         return df
 
     def _build_full_vines(self, df: pd.DataFrame) -> List[Vine]:
-        """Build vines in full topology mode (one vine per data point)."""
+        """Build plant-level work units in full topology mode."""
         vines = []
         for _, r in df.iterrows():
-            v = Vine(position=(r.x, r.y), max_boxes=self.max_boxes_per_vine)
+            total_kg = float(self.yield_per_plant_kg)
+
+            v = Vine(
+                position=(r.x, r.y),
+                total_kg=total_kg,
+                box_capacity_kg=self.box_capacity_kg,
+            )
             v.line = r.line
             v.lot = r.lot
             v.z = r.z
             vines.append(v)
+
         return vines
 
     def _build_line_vines(self, df: pd.DataFrame) -> List[Vine]:
@@ -406,12 +417,13 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
             line_length_m = float(np.linalg.norm(end_xy - start_xy))
             n_plants = int(len(g))
 
-            # TEMPORARY:
-            # keep old box abstraction alive for now
-            total_boxes = n_plants * self.max_boxes_per_vine
+            line_total_kg = float(n_plants * self.yield_per_plant_kg)
 
-            v = Vine(position=(float(centroid_xy[0]), float(centroid_xy[1])), max_boxes=total_boxes)
-
+            v = Vine(
+                position=(float(centroid_xy[0]), float(centroid_xy[1])),
+                total_kg=line_total_kg,
+                box_capacity_kg=self.box_capacity_kg,
+            )
             v.lot = lot_id
             v.line = line_id
             v.line_key = f"{lot_id}::{line_id}"
@@ -449,14 +461,32 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
                 "z": handover_z,
                 "line_indices": indices,
             }
+    def _line_has_open_harvest(self, v: Vine) -> bool:
+        return v.kg_remaining > 1e-9
+
+    def _line_has_ready_box_work(self, v: Vine) -> bool:
+        return v.boxes_ready > 0
+
+    def _line_has_any_work(self, v: Vine) -> bool:
+        return (
+            v.kg_remaining > 1e-9
+            or v.kg_buffer > 1e-9
+            or v.boxes_ready > 0
+            or v.queued_boxes > 0
+        )
     
-    def _find_next_vine(self, from_pos: np.ndarray, exclude_vines: Optional[set] = None,) -> Optional[int]:
+    def _find_next_vine(self, from_pos: np.ndarray, exclude_vines: Optional[set] = None) -> Optional[int]:
         if exclude_vines is None:
             exclude_vines = set()
-        
-        candidates = [i for i, v in enumerate(self.vines) if v.boxes_remaining > 0 and i not in exclude_vines]
+
+        candidates = [
+            i for i, v in enumerate(self.vines)
+            if self._line_has_open_harvest(v) and i not in exclude_vines
+        ]
+
         if not candidates:
             return None
+
         dists = [np.linalg.norm(self.vines[i].position - from_pos) for i in candidates]
         return candidates[int(np.argmin(dists))]
 
@@ -533,8 +563,13 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
         self.charging_xy_norm = self._normalize_position(self.charging_point).astype(np.float32)
         self.charging_z_norm = np.float32(self._normalize_z(self.charging_z))
 
-        self.max_boxes_actual = max(v.total_boxes for v in self.vines) if self.vines else 1
-        self.initial_total_boxes = int(sum(v.boxes_remaining for v in self.vines))
+        self.max_line_kg_actual = max(v.total_kg for v in self.vines) if self.vines else 1.0
+        self.max_boxes_equivalent_actual = max(v.total_boxes_equivalent for v in self.vines) if self.vines else 1
+
+        # Keep the old variable name to avoid touching too many KPI lines later.
+        # It now means total initial box-equivalent service units, not literal boxes.
+        self.initial_total_boxes = int(sum(v.total_boxes_equivalent for v in self.vines))
+        self.initial_total_kg = float(sum(v.total_kg for v in self.vines))
         # Initialize counters
         self.steps = 0
         self.delivered = 0
@@ -636,23 +671,32 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
                 if h.time_left <= 0.0:
                     h.busy = False
                     h.time_left = 0.0
-                    
+
+                    line = self.vines[h.assigned_vine]
+
                     if h.current_action == ACTION_HARVEST:
-                        h.has_box = True
+                        # Harvest action completes by adding kg to the line buffer
+                        line.add_harvested_kg(h.pending_harvest_kg)
+                        h.pending_harvest_kg = 0.0
+
                     elif h.current_action == ACTION_TRANSPORT:
                         if h.has_box:
                             h.has_box = False
+                            h.carried_box_kg = 0.0
                             self.delivered += 1
                             h.delivered_count += 1
                             individual_deliveries[i] = 1
+
                         h.position = self.collection_point.copy()
                         h.transport_fatigue_multiplier = 1.0
+
             if (not h.busy) and (not h.has_box):
                 cur_v = self.vines[h.assigned_vine]
 
-                if cur_v.boxes_remaining <= 0:
+                # Only leave if the current line has no harvest left and no ready box left
+                if (not self._line_has_open_harvest(cur_v)) and (cur_v.boxes_ready <= 0):
                     assigned_vines = {hh.assigned_vine for hh in self.humans}
-                    
+
                     nxt = self._find_next_vine(cur_v.position, exclude_vines=assigned_vines)
 
                     if nxt is None:
@@ -670,14 +714,82 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
             if h.busy:
                 continue
 
-            vine = self.vines[h.assigned_vine]
+            line = self.vines[h.assigned_vine]
 
             a = int(a)
             h.current_action = a
 
-            can_harvest = (not h.has_box) and (vine.boxes_remaining > 0)
-            can_transport = h.has_box
-            can_enqueue = h.has_box and (vine.queued_boxes < self.max_backlog)
+            can_harvest = (not h.has_box) and (line.kg_remaining > 1e-9)
+            can_take_ready_box = (not h.has_box) and (line.boxes_ready > 0)
+            can_transport = h.has_box or can_take_ready_box
+            can_enqueue = (h.has_box or can_take_ready_box) and (line.queued_boxes < self.max_backlog)
+
+            can_do_productive = can_harvest or can_transport or can_enqueue
+            can_rest = (h.fatigue >= self.rest_fatigue_threshold) or (not can_do_productive)
+
+            if a == ACTION_REST and not can_rest:
+                continue
+
+            if a != ACTION_REST and not can_do_productive:
+                continue
+
+            if a == ACTION_HARVEST:
+                if can_harvest:
+                    harvest_events[i] += 1
+                    h.busy = True
+
+                    fatigue_slowdown = 1.0 + 0.8 * h.fatigue
+                    h.time_left = self.harvest_time * fatigue_slowdown
+
+                    # Amount of kg this harvest action contributes
+                    h.pending_harvest_kg = min(
+                        line.kg_remaining,
+                        self.harvest_rate_kg_s * self.harvest_time,
+                    )
+
+                    h.position = line.position.copy()
+
+            elif a == ACTION_ENQUEUE:
+                if can_enqueue:
+                    # If the worker is not already holding a box, pick one ready box from the line
+                    if not h.has_box:
+                        ok = line.take_ready_box()
+                        if not ok:
+                            continue
+                        h.has_box = True
+                        h.carried_box_kg = self.box_capacity_kg
+
+                    line.queued_boxes += 1
+                    line.queue_contributors.append(i)
+                    enqueue_events[i] += 1
+
+                    h.busy = True
+                    h.time_left = self.enqueue_time
+                    h.has_box = False
+                    h.carried_box_kg = 0.0
+                    h.position = line.position.copy()
+
+            elif a == ACTION_TRANSPORT:
+                if can_transport:
+                    # If not already carrying, pick one ready box from the line first
+                    if not h.has_box:
+                        ok = line.take_ready_box()
+                        if not ok:
+                            continue
+                        h.has_box = True
+                        h.carried_box_kg = self.box_capacity_kg
+
+                    start_xyz = self._get_human_xyz(h)
+                    end_xyz = self._get_collection_xyz()
+                    travel_time, fatigue_multiplier = self._human_transport_costs(start_xyz, end_xyz)
+
+                    h.busy = True
+                    h.time_left = travel_time
+                    h.transport_fatigue_multiplier = fatigue_multiplier
+
+            elif a == ACTION_REST:
+                h.busy = True
+                h.time_left = self.rest_time
 
             can_do_productive = can_harvest or can_transport or can_enqueue
             can_rest = (h.fatigue >= self.rest_fatigue_threshold) or (not can_do_productive)
