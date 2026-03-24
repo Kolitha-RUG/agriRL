@@ -500,14 +500,14 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
                 "line_indices": [],
             })
 
-    # 2) Assign each line to the nearest handover node
-    for line_idx, v in enumerate(self.vines):
-        hp_positions = np.array([hp["position"] for hp in self.handover_points], dtype=np.float32)
-        dists = np.linalg.norm(hp_positions - v.position, axis=1)
-        nearest_hid = int(np.argmin(dists))
+        # 2) Assign each line to the nearest handover node
+        for line_idx, v in enumerate(self.vines):
+            hp_positions = np.array([hp["position"] for hp in self.handover_points], dtype=np.float32)
+            dists = np.linalg.norm(hp_positions - v.position, axis=1)
+            nearest_hid = int(np.argmin(dists))
 
-        v.handover_id = nearest_hid
-        self.handover_points[nearest_hid]["line_indices"].append(line_idx)
+            v.handover_id = nearest_hid
+            self.handover_points[nearest_hid]["line_indices"].append(line_idx)
 
     def _line_has_open_harvest(self, v: Vine) -> bool:
         return v.kg_remaining > 1e-9
