@@ -2,12 +2,13 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 
 # =====================
 # Config
 # =====================
 FILE_PATH = "data/Vinha_Maria_Teresa_RL.xlsx"
-OUTPUT_PATH = "vineyard_layout_clean.png"
+OUTPUT_PATH = "vineyard_layout_altitude.png"
 
 FIGSIZE = (12, 9)
 LINE_WIDTH = 1.4
@@ -15,7 +16,15 @@ HANDOVER_SIZE = 140
 COLLECTION_SIZE = 220
 
 SHOW_TITLE = False
-SHOW_LEGEND = True
+SHOW_LEGEND = False
+
+# Colormap options: "terrain", "viridis", "plasma", "coolwarm"
+ALTITUDE_CMAP = "Blues"
+
+# Use percentile clipping for better visual contrast
+USE_PERCENTILE_CLIP = True
+LOWER_PERCENTILE = 2
+UPPER_PERCENTILE = 98
 
 # Manually selected handover points
 HANDOVER_POINTS = [
@@ -41,6 +50,8 @@ def load_vineyard(path: str) -> pd.DataFrame:
         df = pd.read_csv(path)
 
     df = df.copy()
+
+    # Clean expected columns
     df["lot"] = df["lot"].astype(str).str.strip()
     df["line"] = df["line"].astype(str).str.strip()
 
@@ -52,7 +63,7 @@ def load_vineyard(path: str) -> pd.DataFrame:
 
 
 def sort_line_points(g: pd.DataFrame) -> pd.DataFrame:
-    """Sort points along dominant line direction."""
+    """Sort points along the dominant spatial direction of the line."""
     if len(g) <= 2:
         return g.sort_values(["x", "y"]).reset_index(drop=True)
 
@@ -64,27 +75,52 @@ def sort_line_points(g: pd.DataFrame) -> pd.DataFrame:
 
     return (
         g.assign(_proj=proj)
-         .sort_values("_proj")
-         .drop(columns="_proj")
-         .reset_index(drop=True)
+        .sort_values("_proj")
+        .drop(columns="_proj")
+        .reset_index(drop=True)
     )
 
 
 def build_line_geometries(df: pd.DataFrame):
+    """
+    Build line geometries and assign one representative altitude per line.
+    Here, altitude is the mean z of points belonging to that line.
+    """
     line_segments = []
 
     for (lot, line), g in df.groupby(["lot", "line"], sort=True):
         gs = sort_line_points(g)
         xy = gs[["x", "y"]].to_numpy(dtype=float)
+        z_mean = gs["z"].mean()
 
         if len(xy) >= 2:
             seg = xy
         else:
             seg = np.vstack([xy[0], xy[0]])
 
-        line_segments.append((lot, line, seg))
+        line_segments.append((lot, line, seg, z_mean))
 
     return line_segments
+
+
+def get_altitude_norm(z_values: np.ndarray):
+    """Create a normalization object for mapping altitude to color."""
+    cmap = plt.get_cmap(ALTITUDE_CMAP)
+
+    if USE_PERCENTILE_CLIP:
+        vmin = np.percentile(z_values, LOWER_PERCENTILE)
+        vmax = np.percentile(z_values, UPPER_PERCENTILE)
+    else:
+        vmin = z_values.min()
+        vmax = z_values.max()
+
+    # Safety fallback
+    if np.isclose(vmin, vmax):
+        vmin = float(vmin) - 1.0
+        vmax = float(vmax) + 1.0
+
+    norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+    return cmap, norm, vmin, vmax
 
 
 def main():
@@ -97,28 +133,25 @@ def main():
     fig, ax = plt.subplots(figsize=FIGSIZE)
 
     # -------------------------
-    # Consistent color per lot
+    # Color by altitude (z)
     # -------------------------
-    lots = sorted(df["lot"].unique())
-    cmap = plt.get_cmap("tab20", max(len(lots), 1))
-    lot_to_color = {lot: cmap(i % cmap.N) for i, lot in enumerate(lots)}
+    z_values = np.array([z_mean for _, _, _, z_mean in line_segments], dtype=float)
+    cmap, norm, vmin, vmax = get_altitude_norm(z_values)
 
     # -------------------------
-    # Draw vineyard lines by lot
+    # Draw vineyard lines
     # -------------------------
-    used_lots = set()
-    for lot, line, seg in line_segments:
-        label = lot if lot not in used_lots else None
-        used_lots.add(lot)
+    for lot, line, seg, z_mean in line_segments:
+        # Clamp to norm range so extreme values don't break the visual scale
+        z_plot = np.clip(z_mean, vmin, vmax)
 
         ax.plot(
             seg[:, 0],
             seg[:, 1],
-            color=lot_to_color[lot],
+            color=cmap(norm(z_plot)),
             linewidth=LINE_WIDTH,
             alpha=0.95,
             zorder=1,
-            label=label,
         )
 
     # -------------------------
@@ -149,26 +182,14 @@ def main():
         edgecolor="white",
         linewidth=1.8,
         zorder=5,
-
+        label="Collection point",
     )
-
-    # ax.text(
-    #     collection_point[0] + 4,
-    #     collection_point[1],
-    #     "Collection Point",
-    #     fontsize=10,
-    #     weight="bold",
-    #     ha="left",
-    #     va="center",
-    #     color="#1F3A5F",
-    #     zorder=6,
-    # )
 
     # -------------------------
     # Styling
     # -------------------------
     if SHOW_TITLE:
-        ax.set_title("Vineyard layout with handover and collection points", fontsize=14, pad=12)
+        ax.set_title("Vineyard layout colored by altitude", fontsize=14, pad=12)
 
     ax.set_aspect("equal", adjustable="box")
     ax.axis("off")
@@ -178,21 +199,30 @@ def main():
     ax.set_xlim(df["x"].min() - x_pad, df["x"].max() + x_pad)
     ax.set_ylim(df["y"].min() - y_pad, df["y"].max() + y_pad)
 
-    # if SHOW_LEGEND:
-    #     ax.legend(
-    #         loc="upper left",
-    #         frameon=True,
-    #         facecolor="white",
-    #         edgecolor="lightgray",
-    #         ncol=2,
-    #         fontsize=9,
-    #     )
+    # -------------------------
+    # Colorbar
+    # -------------------------
+    sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
+    cbar.set_label("Altitude (z)")
+
+    # Optional legend
+    if SHOW_LEGEND:
+        ax.legend(
+            loc="upper left",
+            frameon=True,
+            facecolor="white",
+            edgecolor="lightgray",
+            fontsize=9,
+        )
 
     plt.tight_layout()
     plt.savefig(OUTPUT_PATH, dpi=300, bbox_inches="tight")
     plt.show()
 
     print(f"Saved clean presentation image to: {OUTPUT_PATH}")
+    print(f"Altitude range used for color mapping: {vmin:.3f} to {vmax:.3f}")
 
 
 if __name__ == "__main__":

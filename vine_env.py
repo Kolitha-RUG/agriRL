@@ -213,21 +213,34 @@ class VineEnv(MultiAgentEnv):
         num_drones: int = 1,
         yield_per_plant_kg: float = 0.6,
         box_capacity_kg: float = 8.0,
-        harvest_rate_kg_s: float = 0.004,
-        human_harvest_fatigue_rate: float = 0.0010,
-        human_transport_fatigue_rate: float = 0.0015,
-        human_rest_recovery_rate: float = 0.0100,
+
+        # In the current setup, 1 step = 1 minute
+        harvest_rate_kg_s: float = 0.24,   # actually kg/step
+        human_harvest_fatigue_rate: float = 0.002,   # per step
+        human_transport_fatigue_rate: float = 0.003, # per step
+        human_rest_recovery_rate: float = 0.004,     # per step
+
         max_backlog: int = 10,
-        max_steps: int = 2000,
-        dt: float = 5.0,
-        harvest_time: float = 300.0,
-        enqueue_time: float = 1.0,
-        rest_time: float = 5.0,
-        human_speed: float = 1.0,
-        drone_speed: float = 5.0,
-        drone_endurance_loaded_s: float = 18.0 * 60.0,
-        drone_endurance_unloaded_s: float = 29.0 * 60.0,
-        drone_charge_time_full_s: float = 36.6 * 60.0,
+        max_steps: int = 480,
+
+        dt: float = 1.0,              # 1 step = 1 minute
+        harvest_time: float = 5.0,    # steps
+        enqueue_time: float = 1.0,    # steps
+        rest_time: float = 5.0,       # steps
+
+        human_speed: float = 48.0,    # m/step
+        drone_speed: float = 300.0,   # m/step
+
+        # Drone timing in steps
+        drone_endurance_loaded_s: float = 18.0,
+        drone_endurance_unloaded_s: float = 29.0,
+        drone_charge_time_full_s: float = 36.6,
+
+        # service times
+        drone_handover_service_time: float = 1.0,
+        drone_dropoff_service_time: float = 1.0,
+
+
         vineyard_file: str = "data/Vinha_Maria_Teresa_RL.xlsx",
         local_vine_k: int = 6,
         reward_delivery: float = 1.0,
@@ -239,25 +252,29 @@ class VineEnv(MultiAgentEnv):
         reward_fatigue_level_penalty: float = 2.0
     ):
         super().__init__()
-        
-        # Direct assignments (no dict)
+        self.vineyard_file = vineyard_file
+        self._base_df = self._load_vineyard(self.vineyard_file)
         self.render_mode = render_mode
         self.topology_mode = topology_mode
+        
         self.num_humans = num_humans
         self.num_drones = num_drones
+
         self.yield_per_plant_kg = float(yield_per_plant_kg)
         self.box_capacity_kg = float(box_capacity_kg)
         self.harvest_rate_kg_s = float(harvest_rate_kg_s)
         self.max_backlog = max_backlog
         self.max_steps = max_steps
-        self.dt = float(dt) #seconds
+
+
+        self.dt = float(dt) 
         self.harvest_time = float(harvest_time)
         self.enqueue_time = float(enqueue_time)
         self.rest_time = float(rest_time)
-        self.human_speed = float(human_speed) #m/s
-        self.drone_speed = float(drone_speed) #m/s
-        self.vineyard_file = vineyard_file
-        self._base_df = self._load_vineyard(self.vineyard_file)
+
+        self.human_speed = float(human_speed)   # m/step
+        self.drone_speed = float(drone_speed)   # m/step
+
         self.local_vine_k = int(local_vine_k)
 
         self.handover_points_xy = (
@@ -268,14 +285,17 @@ class VineEnv(MultiAgentEnv):
 
         self.rest_fatigue_threshold = 0.6
 
-        # Drone battery model (all times in seconds)
-        self.drone_endurance_loaded_s = float(drone_endurance_loaded_s)
-        self.drone_endurance_unloaded_s = float(drone_endurance_unloaded_s)
-        self.drone_charge_time_full_s = float(drone_charge_time_full_s)
+        self.drone_endurance_loaded_s = float(drone_endurance_loaded_s)      # actually steps
+        self.drone_endurance_unloaded_s = float(drone_endurance_unloaded_s)  # actually steps
+        self.drone_charge_time_full_s = float(drone_charge_time_full_s)      # actually steps
+        self.drone_handover_service_time = float(drone_handover_service_time)
+        self.drone_dropoff_service_time = float(drone_dropoff_service_time)
 
         self.drone_batt_drain_rate_loaded = 100.0 / max(self.drone_endurance_loaded_s, 1e-6)
         self.drone_batt_drain_rate_unloaded = 100.0 / max(self.drone_endurance_unloaded_s, 1e-6)
         self.drone_batt_charge_rate = 100.0 / max(self.drone_charge_time_full_s, 1e-6)
+
+
 
         self.reward_delivery = float(reward_delivery)
         self.reward_backlog_penalty = float(reward_backlog_penalty)
@@ -903,7 +923,7 @@ class VineEnv(MultiAgentEnv):
 
                             dist = float(np.linalg.norm(d.position - self.collection_point))
                             d.busy = True
-                            d.time_left = dist / max(self.drone_speed, 1e-6)
+                            d.time_left = (dist / max(self.drone_speed, 1e-6)) + self.drone_dropoff_service_time
                         else:
                             d.status = DRONE_IDLE
                             d.target_handover = None
@@ -981,7 +1001,7 @@ class VineEnv(MultiAgentEnv):
                     d.target_handover = target
                     d.status = DRONE_GO_TO_HANDOVER
                     d.busy = True
-                    d.time_left = t_go
+                    d.time_left = t_go + self.drone_handover_service_time
                         
         # --- count drone status time this timestep ---
         for j, d in enumerate(self.drones):
@@ -1593,13 +1613,13 @@ def test_environment():
         topology_mode="line",
         num_humans=5,
         num_drones=1,
-        yield_per_plant_kg=0.6,     # placeholder scenario value
-        box_capacity_kg=8.0,        # placeholder scenario value
-        harvest_rate_kg_s=0.004,    # placeholder; calibrate later from productivity
+        yield_per_plant_kg=0.6,     
+        box_capacity_kg=8.0,        
+        harvest_rate_kg_s=0.004,    
         max_backlog=5,
         max_steps=5000,
         dt=5.0,
-        harvest_time=300.0,         # 5 min harvest cycle
+        harvest_time=300.0,         
         human_speed=1.0,
         drone_speed=5.0,
         vineyard_file="data/Vinha_Maria_Teresa_RL.xlsx",

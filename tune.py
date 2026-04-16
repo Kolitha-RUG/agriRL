@@ -45,8 +45,6 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
-        # print("MODEL obs_space:", obs_space)
-        # print("MODEL original_space:", getattr(obs_space, "original_space", None))
 
         self.num_actions = int(action_space.n)
 
@@ -80,9 +78,7 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
 
 def env_creator(env_config):
     env = VineEnv(**env_config)
-    # print("ENV FILE:", VineEnv.__module__)
-    # print("OBS SPACE TYPE:", type(env.observation_space))
-    # print("OBS SPACE:", env.observation_space)
+
     return env
 
 
@@ -103,55 +99,55 @@ if __name__ == "__main__":
         topology_mode="line",
         vineyard_file=os.path.join(PROJECT_DIR, "data", "Vinha_Maria_Teresa_RL.xlsx"),
         local_vine_k=6,
-        num_humans=5,
-        num_drones=2,
+        num_humans=10,
+        num_drones=1,
+
         yield_per_plant_kg=0.6,
         box_capacity_kg=8.0,
-        harvest_rate_kg_s=0.004,
 
-        # Fatigue rates (per second)
-        human_harvest_fatigue_rate=0.0010,
-        human_transport_fatigue_rate=0.0015,
-        human_rest_recovery_rate=0.0100,
+        dt=1.0,                     # 1 step = 1 minute
 
-        max_steps=1200,
+        harvest_rate_kg_s=0.24,     # actually kg/step
+        harvest_time=5.0,           # 5 min
+        enqueue_time=1.0,           # 1 min
+        rest_time=5.0,              # 5 min
+
+        human_speed=48.0,           # m/step
+        drone_speed=300.0,          # m/step
+
+        human_harvest_fatigue_rate=0.002,
+        human_transport_fatigue_rate=0.003,
+        human_rest_recovery_rate=0.004,
+
+        drone_endurance_loaded_s=18.0,     # steps
+        drone_endurance_unloaded_s=29.0,   # steps
+        drone_charge_time_full_s=36.6,     # steps
+
+        drone_handover_service_time=1.0,  # 1 min at handover
+        drone_dropoff_service_time=1.0,   # 1 min at collection
+
+        max_steps=480,              # 8 hours
         max_backlog=10,
-        dt=5.0,
-        harvest_time=300.0,
-        human_speed=1.0,
-        drone_speed=5.0,
-
-        # Drone timing (seconds)
-        drone_endurance_loaded_s=18.0 * 60.0,
-        drone_endurance_unloaded_s=29.0 * 60.0,
-        drone_charge_time_full_s=36.6 * 60.0,
 
         reward_backlog_penalty=0.05,
         reward_fatigue_inc_penalty=1.5,
         reward_delivery=3,
         reward_fatigue_level_penalty=2,
     )
-# delivery weight: 0.2 / 0.12 = 1.67
-
-# fatigue increase weight: 0.2 / 0.08 = 2.5
-
-# backlog weight: 0.2 / 3.0 = 0.067
-
-# fatigue level weight: 0.2 / 0.5 = 0.4
     config = (
         PPOConfig()
 
         .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
         .environment(env="MultiAgentVineAsync", env_config=env_config)
-        .env_runners(num_env_runners=4, num_envs_per_env_runner=1)
+        .env_runners(num_env_runners=10, num_envs_per_env_runner=1)
         .training(
             gamma=0.99,
-            lr=2e-4,
+            lr=1e-3,
             train_batch_size=8000,
             entropy_coeff=0.01,
             model={
                 "custom_model": "torch_action_mask_model",
-                "fcnet_hiddens": [128, 64],
+                "fcnet_hiddens": [32, 32],
                 "fcnet_activation": "relu",
             },
         )
@@ -180,22 +176,3 @@ if __name__ == "__main__":
 
 #  tensorboard --logdir=ray_results_vine/vineyard_ppo
 
-# r_delivery_per_step ≈ +0.18
-
-# r_backlog_per_step ≈ −0.031
-
-# r_fatigue_inc_per_step ≈ −0.098
-
-# r_fatigue_level_per_step ≈ −0.37
-
-# r_total_per_step ≈ −0.32
-
-# Then:
-
-# delivery weight: 0.2 / 0.12 = 1.67
-
-# fatigue increase weight: 0.2 / 0.08 = 2.5
-
-# backlog weight: 0.2 / 3.0 = 0.067
-
-# fatigue level weight: 0.2 / 0.5 = 0.4
