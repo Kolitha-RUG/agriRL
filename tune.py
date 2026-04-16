@@ -18,7 +18,7 @@ from ray.rllib.utils.torch_utils import FLOAT_MIN
 import torch
 import torch.nn as nn
 
-from vine_env_multiagent_async import MultiAgentVineEnvAsync
+from vine_env import VineEnv
 import os
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -79,8 +79,8 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
 
 
 def env_creator(env_config):
-    env = MultiAgentVineEnvAsync(**env_config)
-    # print("ENV FILE:", MultiAgentVineEnvAsync.__module__)
+    env = VineEnv(**env_config)
+    # print("ENV FILE:", VineEnv.__module__)
     # print("OBS SPACE TYPE:", type(env.observation_space))
     # print("OBS SPACE:", env.observation_space)
     return env
@@ -147,7 +147,8 @@ if __name__ == "__main__":
         .training(
             gamma=0.99,
             lr=2e-4,
-            train_batch_size=2000,
+            train_batch_size=8000,
+            entropy_coeff=0.01,
             model={
                 "custom_model": "torch_action_mask_model",
                 "fcnet_hiddens": [128, 64],

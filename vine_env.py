@@ -173,7 +173,7 @@ class Drone:
 
 
 
-class MultiAgentVineEnvAsync(MultiAgentEnv):
+class VineEnv(MultiAgentEnv):
     """
     Multi-Agent Vineyard Harvesting Environment.
     
@@ -1588,7 +1588,7 @@ class MultiAgentVineEnvAsync(MultiAgentEnv):
 
 def test_environment():
     """Test the Multi-Agent Vine Environment."""
-    env = MultiAgentVineEnvAsync(
+    env = VineEnv(
         render_mode="human",
         topology_mode="line",
         num_humans=5,
