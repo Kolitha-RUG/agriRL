@@ -1,0 +1,22 @@
+policy,metric,mean,std
+RL,kpi_delivered_total,28.0,0.0
+RL,kpi_throughput_per_100_steps,11.666666666666668,1.7763568394002505e-15
+RL,kpi_mean_backlog,6.916666666666667,0.0
+RL,kpi_mean_fatigue,0.48123085574871044,5.551115123125783e-17
+RL,kpi_rest_ratio,0.1720833333333333,0.0
+RL,kpi_completion_pct,18.518518518518523,3.552713678800501e-15
+RL,r_total_per_step,0.0414122524151413,0.0
+Manual,kpi_delivered_total,26.0,0.0
+Manual,kpi_throughput_per_100_steps,10.833333333333332,1.7763568394002505e-15
+Manual,kpi_mean_backlog,0.0,0.0
+Manual,kpi_mean_fatigue,0.7250987462732918,1.1102230246251565e-16
+Manual,kpi_rest_ratio,0.0,0.0
+Manual,kpi_completion_pct,18.40796019900497,0.0
+Manual,r_total_per_step,-0.31197621428489886,5.551115123125783e-17
+Only Drone,kpi_delivered_total,32.0,0.0
+Only Drone,kpi_throughput_per_100_steps,13.333333333333334,0.0
+Only Drone,kpi_mean_backlog,6.783333333333333,0.0
+Only Drone,kpi_mean_fatigue,0.5276195853508783,0.0
+Only Drone,kpi_rest_ratio,0.0,0.0
+Only Drone,kpi_completion_pct,18.794914317302368,3.552713678800501e-15
+Only Drone,r_total_per_step,-0.020085945123934197,3.469446951953614e-18
