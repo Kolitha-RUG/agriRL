@@ -214,12 +214,16 @@ class VineEnv(MultiAgentEnv):
         
         yield_per_plant_kg: float = 0.6,
         box_capacity_kg: float = 8.0,
+        
 
         # In the current setup, 1 step = 1 minute
         harvest_rate_kg_s: float = 0.24,   # actually kg/step
         human_harvest_fatigue_rate: float = 0.002,   # per step
         human_transport_fatigue_rate: float = 0.003, # per step
         human_rest_recovery_rate: float = 0.004,     # per step
+
+        rest_fatigue_threshold: float = 0.4,
+
 
         max_backlog: int = 10,
         max_steps: int = 480,
@@ -284,7 +288,7 @@ class VineEnv(MultiAgentEnv):
                 else list(DEFAULT_HANDOVER_POINTS_XY)
             )
 
-        self.rest_fatigue_threshold = 0.6
+        self.rest_fatigue_threshold = float(rest_fatigue_threshold)
 
         self.drone_endurance_loaded_s = float(drone_endurance_loaded_s)      # actually steps
         self.drone_endurance_unloaded_s = float(drone_endurance_unloaded_s)  # actually steps

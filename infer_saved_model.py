@@ -24,7 +24,7 @@ CHECKPOINT_PATH = os.path.join(
     "ray_results_vine",
     "vineyard_ppo",
     # change this to your actual trial folder
-    "PPO_MultiAgentVineAsync_dfdd0_00000_0_2026-04-17_07-11-22",
+    "PPO_MultiAgentVineAsync_71976_00000_0_2026-04-17_09-31-26",
     # change this to the checkpoint you want
     "checkpoint_000000",
 )

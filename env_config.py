@@ -8,7 +8,7 @@ BASE_ENV_CONFIG = {
     "topology_mode": "line",
     "vineyard_file": os.path.join(PROJECT_DIR, "data", "Vinha_Maria_Teresa_RL.xlsx"),
     "local_vine_k": 6,
-    "num_humans": 10,
+    "num_humans": 5,
     "num_drones": 1,
 
     "yield_per_plant_kg": 0.6,
@@ -20,7 +20,8 @@ BASE_ENV_CONFIG = {
     "harvest_time": 5.0,
     "enqueue_time": 0.0,
     "rest_time": 5.0,
-
+    "rest_fatigue_threshold": 0.4,
+    
     "human_speed": 30.0,
     "drone_speed": 300.0,
 

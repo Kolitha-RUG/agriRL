@@ -1,3 +1,4 @@
 data/
 archive/
 __pycache__/
+inference_results/
