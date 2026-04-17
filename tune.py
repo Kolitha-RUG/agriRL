@@ -20,6 +20,9 @@ import torch.nn as nn
 
 from vine_env import VineEnv
 import os
+from env_config import get_env_config
+
+
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class VineyardKPI(DefaultCallbacks):
@@ -94,56 +97,19 @@ if __name__ == "__main__":
     register_env("MultiAgentVineAsync", env_creator)
     ModelCatalog.register_custom_model("torch_action_mask_model", TorchActionMaskModel)
 
-    env_config = dict(
-        render_mode=None,
-        topology_mode="line",
-        vineyard_file=os.path.join(PROJECT_DIR, "data", "Vinha_Maria_Teresa_RL.xlsx"),
-        local_vine_k=6,
-        num_humans=10,
-        num_drones=1,
-
-        yield_per_plant_kg=0.6,
-        box_capacity_kg=8.0,
-
-        dt=1.0,                     # 1 step = 1 minute
-
-        harvest_rate_kg_s=0.24,     # actually kg/step
-        harvest_time=5.0,           # 5 min
-        enqueue_time=1.0,           # 1 min
-        rest_time=5.0,              # 5 min
-
-        human_speed=48.0,           # m/step
-        drone_speed=300.0,          # m/step
-
-        human_harvest_fatigue_rate=0.002,
-        human_transport_fatigue_rate=0.003,
-        human_rest_recovery_rate=0.004,
-
-        drone_endurance_loaded_s=18.0,     # steps
-        drone_endurance_unloaded_s=29.0,   # steps
-        drone_charge_time_full_s=36.6,     # steps
-
-        drone_handover_service_time=1.0,  # 1 min at handover
-        drone_dropoff_service_time=1.0,   # 1 min at collection
-
-        max_steps=480,              # 8 hours
-        max_backlog=10,
-
-        reward_backlog_penalty=0.05,
-        reward_fatigue_inc_penalty=1.5,
-        reward_delivery=3,
-        reward_fatigue_level_penalty=2,
-    )
+    env_config = get_env_config()
     config = (
         PPOConfig()
 
         .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
-        .environment(env="MultiAgentVineAsync", env_config=env_config)
-        .env_runners(num_env_runners=10, num_envs_per_env_runner=1)
+        .environment(env="MultiAgentVineAsync", env_config=env_config,disable_env_checking=True,)
+        .env_runners(num_env_runners=5, num_envs_per_env_runner=1)
         .training(
             gamma=0.99,
             lr=1e-3,
-            train_batch_size=8000,
+            train_batch_size=4000,
+            minibatch_size=512,
+            num_epochs=6,
             entropy_coeff=0.01,
             model={
                 "custom_model": "torch_action_mask_model",
@@ -157,7 +123,7 @@ if __name__ == "__main__":
         )
         .callbacks(VineyardKPI)
         .resources(
-            num_gpus=1,
+            num_gpus=0,
         )
     )
 
@@ -167,7 +133,7 @@ if __name__ == "__main__":
         run_config=RunConfig(
             name="vineyard_ppo",
             storage_path=os.path.join(PROJECT_DIR, "ray_results_vine"),
-            stop={"training_iteration": 200},
+            stop={"training_iteration": 20},
         ),
     )
 

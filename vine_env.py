@@ -211,6 +211,7 @@ class VineEnv(MultiAgentEnv):
         topology_mode: str = "line",
         num_humans: int = 2,
         num_drones: int = 1,
+        
         yield_per_plant_kg: float = 0.6,
         box_capacity_kg: float = 8.0,
 
@@ -259,7 +260,7 @@ class VineEnv(MultiAgentEnv):
         
         self.num_humans = num_humans
         self.num_drones = num_drones
-
+        self.local_neighbor_cache = None
         self.yield_per_plant_kg = float(yield_per_plant_kg)
         self.box_capacity_kg = float(box_capacity_kg)
         self.harvest_rate_kg_s = float(harvest_rate_kg_s)
@@ -388,8 +389,8 @@ class VineEnv(MultiAgentEnv):
         self.human_transport_fatigue_rate = float(human_transport_fatigue_rate)
         self.human_rest_recovery_rate = float(human_rest_recovery_rate)
 
-        self.slope_time_factor = 1.5
-        self.slope_fatigue_factor = 2.0
+        self.slope_time_factor = 2.5
+        self.slope_fatigue_factor = 3.5
         self.steps = 0
         self.delivered = 0
 
@@ -496,6 +497,30 @@ class VineEnv(MultiAgentEnv):
 
         return vines
     
+    def _precompute_local_neighbors(self) -> None:
+        """
+        Precompute nearest local_vine_k lines for each line centroid.
+
+        Result:
+            self.local_neighbor_cache[i] = array of nearest line indices for line i
+        """
+        if self.num_vines == 0:
+            self.local_neighbor_cache = np.zeros((0, 0), dtype=np.int32)
+            return
+
+        positions = np.array([v.position for v in self.vines], dtype=np.float32)  # [N, 2]
+
+        # Pairwise Euclidean distances: [N, N]
+        diff = positions[:, None, :] - positions[None, :, :]
+        dist_mat = np.linalg.norm(diff, axis=2)
+
+        k = min(self.local_vine_k, self.num_vines)
+
+        # nearest k including self
+        nearest = np.argsort(dist_mat, axis=1)[:, :k].astype(np.int32)
+
+        self.local_neighbor_cache = nearest
+    
     def _build_handover_points(self) -> None:
         """
         Build designated handover points from manually selected XY coordinates.
@@ -573,6 +598,27 @@ class VineEnv(MultiAgentEnv):
     
     def _get_line_handover(self, line: Vine) -> Dict[str, Any]:
         return self.handover_points[line.handover_id]
+    
+    def _human_round_trip_costs(self,
+            start_xyz: np.ndarray,
+            target_xyz: np.ndarray,
+            return_xyz: np.ndarray,) -> Tuple[float, float]:
+        """
+        Round-trip human transport cost.
+
+        Returns:
+            total_time: outbound + return travel time
+            avg_fatigue_multiplier: time-weighted average over both legs
+        """
+        t_out, m_out = self._human_transport_costs(start_xyz, target_xyz)
+        t_back, m_back = self._human_transport_costs(target_xyz, return_xyz)
+
+        total_time = t_out + t_back
+        avg_multiplier = (
+            (t_out * m_out + t_back * m_back) / max(total_time, 1e-6)
+        )
+
+        return float(total_time), float(avg_multiplier)
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict, Dict]:
         """
@@ -599,7 +645,8 @@ class VineEnv(MultiAgentEnv):
 
         # Build designated handover points and assign each line to the nearest one
         self._build_handover_points()
-        
+        self._precompute_local_neighbors()
+
         xs = np.array([v.position[0] for v in self.vines], dtype=np.float32)
         ys = np.array([v.position[1] for v in self.vines], dtype=np.float32)
         zs = np.array([v.z for v in self.vines], dtype=np.float32)
@@ -683,6 +730,9 @@ class VineEnv(MultiAgentEnv):
         self.ep_r_backlog_sum = 0.0
         self.ep_r_fatigue_level_sum = 0.0
         self.ep_reward_sum = 0.0
+
+        self.ep_manual_delivered_total = 0
+        self.ep_drone_delivered_total = 0
         # Initialize humans at their assigned vines
         self.humans = []
         for h in range(self.num_humans):
@@ -780,8 +830,9 @@ class VineEnv(MultiAgentEnv):
 
                             h.has_box = False
                             h.carried_box_kg = 0.0
-                            h.position = hp["position"].copy()
 
+                        # round trip finished -> worker is back at the line
+                        h.position = line.position.copy()
                         h.transport_fatigue_multiplier = 1.0
 
                     elif h.current_action == ACTION_TRANSPORT:
@@ -792,7 +843,8 @@ class VineEnv(MultiAgentEnv):
                             h.delivered_count += 1
                             individual_deliveries[i] = 1
 
-                        h.position = self.collection_point.copy()
+                        # round trip finished -> worker is back at the line
+                        h.position = line.position.copy()
                         h.transport_fatigue_multiplier = 1.0
 
             if (not h.busy) and (not h.has_box):
@@ -864,12 +916,17 @@ class VineEnv(MultiAgentEnv):
                         h.has_box = True
                         h.carried_box_kg = self.box_capacity_kg
 
-                    start_xyz = self._get_human_xyz(h)
-                    end_xyz = self._get_handover_xyz(line.handover_id)
-                    travel_time, fatigue_multiplier = self._human_transport_costs(start_xyz, end_xyz)
+                    line_xyz = self.get_vine_xyz(h.assigned_vine)
+                    handover_xyz = self._get_handover_xyz(line.handover_id)
+
+                    travel_time, fatigue_multiplier = self._human_round_trip_costs(
+                        line_xyz,
+                        handover_xyz,
+                        line_xyz,
+                    )
 
                     enqueue_events[i] += 1
-
+                    
                     h.busy = True
                     h.time_left = travel_time + self.enqueue_time
                     h.transport_fatigue_multiplier = fatigue_multiplier
@@ -878,19 +935,28 @@ class VineEnv(MultiAgentEnv):
                 if can_transport:
                     # If not already carrying, pick one ready box from the line first
                     if not h.has_box:
+                        
                         ok = line.take_ready_box()
                         if not ok:
                             continue
                         h.has_box = True
                         h.carried_box_kg = self.box_capacity_kg
+                        self.ep_manual_delivered_total += 1
 
-                    start_xyz = self._get_human_xyz(h)
-                    end_xyz = self._get_collection_xyz()
-                    travel_time, fatigue_multiplier = self._human_transport_costs(start_xyz, end_xyz)
+
+                    line_xyz = self.get_vine_xyz(h.assigned_vine)
+                    collection_xyz = self._get_collection_xyz()
+
+                    travel_time, fatigue_multiplier = self._human_round_trip_costs(
+                        line_xyz,
+                        collection_xyz,
+                        line_xyz,
+                    )
 
                     h.busy = True
                     h.time_left = travel_time
                     h.transport_fatigue_multiplier = fatigue_multiplier
+
 
             elif a == ACTION_REST:
                 h.busy = True
@@ -934,6 +1000,7 @@ class VineEnv(MultiAgentEnv):
                             d.has_box = False
                             self.delivered += 1
                             d.delivered_count += 1
+                            self.ep_drone_delivered_total += 1
                             if d.last_contributor is not None:
                                 drone_credit_deliveries[d.last_contributor] += 1
                             d.last_contributor = None
@@ -1303,17 +1370,17 @@ class VineEnv(MultiAgentEnv):
 
     def _get_local_vine_indices(self, human: Human) -> np.ndarray:
         """
-        Return indices of the K nearest vines to this human.
+        Return cached nearest local lines for this human's assigned line.
         """
         if self.num_vines == 0:
             return np.array([], dtype=np.int32)
 
-        dists = np.array(
-            [np.linalg.norm(v.position - human.position) for v in self.vines],
-            dtype=np.float32,
-        )
-        k = min(self.local_vine_k, self.num_vines)
-        return np.argsort(dists)[:k].astype(np.int32)
+        assigned = int(human.assigned_vine)
+
+        if self.local_neighbor_cache is None:
+            return np.array([assigned], dtype=np.int32)
+
+        return self.local_neighbor_cache[assigned]
 
     def _get_obs_for_agent(self, agent_idx: int) -> np.ndarray:
         """
@@ -1611,18 +1678,6 @@ def test_environment():
     env = VineEnv(
         render_mode="human",
         topology_mode="line",
-        num_humans=5,
-        num_drones=1,
-        yield_per_plant_kg=0.6,     
-        box_capacity_kg=8.0,        
-        harvest_rate_kg_s=0.004,    
-        max_backlog=5,
-        max_steps=5000,
-        dt=5.0,
-        harvest_time=300.0,         
-        human_speed=1.0,
-        drone_speed=5.0,
-        vineyard_file="data/Vinha_Maria_Teresa_RL.xlsx",
     )
 
     observations, infos = env.reset()
