@@ -2,3 +2,4 @@ data/
 archive/
 __pycache__/
 inference_results/
+old_results/
