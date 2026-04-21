@@ -39,9 +39,9 @@ BASE_ENV_CONFIG = {
     "max_steps": 240,
     "max_backlog": 10,
 
-    "reward_backlog_penalty": 0.05,
+    "reward_backlog_penalty": 1,
     "reward_fatigue_inc_penalty": 1.5,
-    "reward_delivery": 3,
+    "reward_delivery": 1,
     "reward_fatigue_level_penalty": 2,
 }
 

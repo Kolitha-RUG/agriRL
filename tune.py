@@ -102,7 +102,9 @@ if __name__ == "__main__":
         PPOConfig()
 
         .api_stack(enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False)
-        .environment(env="MultiAgentVineAsync", env_config=env_config,disable_env_checking=True,)
+        .environment(env="MultiAgentVineAsync", env_config=env_config,
+                    #  disable_env_checking=True,
+                     )
         .env_runners(num_env_runners=5, num_envs_per_env_runner=1)
         .training(
             gamma=0.99,
@@ -133,7 +135,7 @@ if __name__ == "__main__":
         run_config=RunConfig(
             name="vineyard_ppo",
             storage_path=os.path.join(PROJECT_DIR, "ray_results_vine"),
-            stop={"training_iteration": 20},
+            stop={"training_iteration": 100},
         ),
     )
 
