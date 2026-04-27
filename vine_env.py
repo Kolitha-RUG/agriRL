@@ -702,41 +702,50 @@ class VineEnv(MultiAgentEnv):
         # Initialize counters
         self.steps = 0
         self.delivered = 0
-        # --- KPI accumulators (steps-based) ---
-        self.ep_step_count = 0
-        self.ep_delivered_total = 0  # will accumulate delivered_delta
-        self.ep_backlog_sum = 0
-        self.ep_backlog_peak = 0
+        
 
+        # --- KPI accumulators ---
+        self.ep_step_count = 0
+
+        # Delivery KPIs
+        self.ep_delivered_total = 0
+        self.ep_human_delivered_total = 0
+        self.ep_drone_delivered_total = 0
+
+        self.ep_human_manual_deliveries = np.zeros(self.num_humans, dtype=np.int32)
+        self.ep_human_drone_assisted_deliveries = np.zeros(self.num_humans, dtype=np.int32)
+
+        # Backlog KPIs
+        self.ep_backlog_total_sum = 0.0
+        self.ep_backlog_total_peak = 0
+
+        self.ep_handover_backlog_sum = np.zeros(len(self.handover_points), dtype=np.float32)
+        self.ep_handover_backlog_peak = np.zeros(len(self.handover_points), dtype=np.int32)
+
+        # Fatigue KPIs
+        self.ep_mean_fatigue_sum = 0.0
+        self.ep_peak_fatigue = 0.0
+
+        self.ep_human_fatigue_sum = np.zeros(self.num_humans, dtype=np.float32)
+        self.ep_human_peak_fatigue = np.zeros(self.num_humans, dtype=np.float32)
+
+        # Supporting behavioural KPIs
         self.ep_human_rest_steps = 0
         self.ep_human_busy_steps = 0
-
         self.ep_drone_flying_steps = 0
-        # --- episode counters (for TensorBoard) ---
+
+        # Decision counters, not time-step counters
         self.ep_human_action_steps = np.zeros((self.num_humans, self.num_actions), dtype=np.int32)
         self.ep_human_action_seconds = np.zeros((self.num_humans, self.num_actions), dtype=np.float32)
 
         self.ep_drone_status_steps = np.zeros((self.num_drones, self.num_drone_status), dtype=np.int32)
         self.ep_drone_status_seconds = np.zeros((self.num_drones, self.num_drone_status), dtype=np.float32)
 
-        self.ep_fatigue_increase_total = 0.0
-        self.ep_delivered_delta_total = 0
-
-        # --- fatigue KPIs (steps-based) ---
-        self.ep_fatigue_sum = 0.0          # sum over steps of mean fatigue across humans
-        self.ep_fatigue_peak = 0.0         # max fatigue seen (any human, any time)
-        self.ep_fatigue_hi_steps = 0        # optional: count of human-steps above threshold
-        self.fatigue_hi_threshold = 0.7     # choose threshold
-
-        # --- reward-term breakdown (episode accumulators) ---
+        # Reward diagnostics only, not main KPIs
         self.ep_r_delivery_sum = 0.0
-        self.ep_r_fatigue_inc_sum = 0.0
         self.ep_r_backlog_sum = 0.0
         self.ep_r_fatigue_level_sum = 0.0
         self.ep_reward_sum = 0.0
-
-        self.ep_manual_delivered_total = 0
-        self.ep_drone_delivered_total = 0
         # Initialize humans at their assigned vines
         self.humans = []
         for h in range(self.num_humans):
@@ -779,13 +788,7 @@ class VineEnv(MultiAgentEnv):
         enqueue_events = [0] * self.num_humans
         drone_credit_deliveries = [0] * self.num_humans
         fatigue_before = [h.fatigue for h in self.humans]
-        # --- count what humans are doing this timestep ---
-        # --- count only actual human decisions this timestep ---
-        for agent_id, a in action_dict.items():
-            i = self.agent_index[agent_id]
-            a = int(a)
-            self.ep_human_action_steps[i, a] += 1
-            self.ep_human_action_seconds[i, a] += self.dt
+
         # 1) Progress ongoing actions (timers) for humans
         for i, h in enumerate(self.humans):
             if h.busy:
@@ -843,8 +846,13 @@ class VineEnv(MultiAgentEnv):
                         if h.has_box:
                             h.has_box = False
                             h.carried_box_kg = 0.0
+
                             self.delivered += 1
                             h.delivered_count += 1
+
+                            self.ep_human_delivered_total += 1
+                            self.ep_human_manual_deliveries[i] += 1
+
                             individual_deliveries[i] = 1
 
                         # round trip finished -> worker is back at the line
@@ -896,6 +904,10 @@ class VineEnv(MultiAgentEnv):
 
             if a == ACTION_HARVEST:
                 if can_harvest:
+                    # Count only accepted new decisions
+                    self.ep_human_action_steps[i, a] += 1
+                    self.ep_human_action_seconds[i, a] += self.dt
+
                     harvest_events[i] += 1
                     h.busy = True
 
@@ -920,6 +932,10 @@ class VineEnv(MultiAgentEnv):
                         h.has_box = True
                         h.carried_box_kg = self.box_capacity_kg
 
+                    # Count only accepted new decisions
+                    self.ep_human_action_steps[i, a] += 1
+                    self.ep_human_action_seconds[i, a] += self.dt
+
                     line_xyz = self.get_vine_xyz(h.assigned_vine)
                     handover_xyz = self._get_handover_xyz(line.handover_id)
 
@@ -930,7 +946,7 @@ class VineEnv(MultiAgentEnv):
                     )
 
                     enqueue_events[i] += 1
-                    
+
                     h.busy = True
                     h.time_left = travel_time + self.enqueue_time
                     h.transport_fatigue_multiplier = fatigue_multiplier
@@ -939,14 +955,16 @@ class VineEnv(MultiAgentEnv):
                 if can_transport:
                     # If not already carrying, pick one ready box from the line first
                     if not h.has_box:
-                        
                         ok = line.take_ready_box()
                         if not ok:
                             continue
                         h.has_box = True
                         h.carried_box_kg = self.box_capacity_kg
-                        self.ep_manual_delivered_total += 1
+                        
 
+                    # Count only accepted new decisions
+                    self.ep_human_action_steps[i, a] += 1
+                    self.ep_human_action_seconds[i, a] += self.dt
 
                     line_xyz = self.get_vine_xyz(h.assigned_vine)
                     collection_xyz = self._get_collection_xyz()
@@ -961,8 +979,11 @@ class VineEnv(MultiAgentEnv):
                     h.time_left = travel_time
                     h.transport_fatigue_multiplier = fatigue_multiplier
 
-
             elif a == ACTION_REST:
+                # Count only accepted new decisions
+                self.ep_human_action_steps[i, a] += 1
+                self.ep_human_action_seconds[i, a] += self.dt
+
                 h.busy = True
                 h.time_left = self.rest_time
 
@@ -1000,13 +1021,19 @@ class VineEnv(MultiAgentEnv):
                             
                     elif d.status == DRONE_DELIVER:
                         d.position = self.collection_point.copy()
+
                         if d.has_box:
                             d.has_box = False
+
                             self.delivered += 1
                             d.delivered_count += 1
                             self.ep_drone_delivered_total += 1
+
                             if d.last_contributor is not None:
-                                drone_credit_deliveries[d.last_contributor] += 1
+                                contributor = int(d.last_contributor)
+                                drone_credit_deliveries[contributor] += 1
+                                self.ep_human_drone_assisted_deliveries[contributor] += 1
+
                             d.last_contributor = None
                         
                         d.status = DRONE_IDLE
@@ -1079,35 +1106,40 @@ class VineEnv(MultiAgentEnv):
             s = int(d.status)
             self.ep_drone_status_steps[j, s] += 1
             self.ep_drone_status_seconds[j, s] += self.dt
-
-        self.ep_fatigue_increase_total += float(sum(fatigue_increase))
         
-        # --- fatigue KPI update (per step) ---
-        mean_fatigue_t = float(np.mean([h.fatigue for h in self.humans]))
-        max_fatigue_t = float(np.max([h.fatigue for h in self.humans]))
+        # --- fatigue KPI update ---
+        human_fatigues = np.array([h.fatigue for h in self.humans], dtype=np.float32)
 
-        self.ep_fatigue_sum += mean_fatigue_t
-        if max_fatigue_t > self.ep_fatigue_peak:
-            self.ep_fatigue_peak = max_fatigue_t
+        mean_fatigue_t = float(np.mean(human_fatigues))
+        max_fatigue_t = float(np.max(human_fatigues))
 
-        # optional: count human-steps above threshold
-        self.ep_fatigue_hi_steps += int(sum(1 for h in self.humans if h.fatigue >= self.fatigue_hi_threshold))
+        self.ep_mean_fatigue_sum += mean_fatigue_t
+        self.ep_peak_fatigue = max(self.ep_peak_fatigue, max_fatigue_t)
 
-
+        self.ep_human_fatigue_sum += human_fatigues
+        self.ep_human_peak_fatigue = np.maximum(self.ep_human_peak_fatigue, human_fatigues)
 
         # Calculate rewards
         delivered_delta = self.delivered - delivered_before
-        self.ep_delivered_delta_total += int(delivered_delta)
-        backlog_total = sum(hp["queued_boxes"] for hp in self.handover_points)
+
+        handover_backlogs = np.array(
+            [hp["queued_boxes"] for hp in self.handover_points],
+            dtype=np.int32
+        )
+        backlog_total = int(np.sum(handover_backlogs))
 
         # --- update KPI accumulators ---
         self.ep_step_count += 1
         self.ep_delivered_total += int(delivered_delta)
 
-        self.ep_backlog_sum += int(backlog_total)
-        if backlog_total > self.ep_backlog_peak:
-            self.ep_backlog_peak = int(backlog_total)
+        self.ep_backlog_total_sum += float(backlog_total)
+        self.ep_backlog_total_peak = max(self.ep_backlog_total_peak, backlog_total)
 
+        self.ep_handover_backlog_sum += handover_backlogs
+        self.ep_handover_backlog_peak = np.maximum(
+            self.ep_handover_backlog_peak,
+            handover_backlogs
+        )
         # Humans: count REST + BUSY
         for h in self.humans:
             if h.busy and h.current_action == ACTION_REST:
@@ -1143,8 +1175,6 @@ class VineEnv(MultiAgentEnv):
         self.ep_r_fatigue_level_sum += float(r_fatigue)
         self.ep_r_backlog_sum += float(r_backlog)
 
-        # Keep unused old term as zero
-        self.ep_r_fatigue_inc_sum += 0.0
 
         step_rewards = {}
 
@@ -1169,13 +1199,7 @@ class VineEnv(MultiAgentEnv):
 
         summary = {}
         if terminated or truncated:
-            human_steps = self.ep_human_action_steps.sum(axis=0)
-            drone_steps = self.ep_drone_status_steps.sum(axis=0)
-
             steps = max(1, int(self.ep_step_count))
-
-            mean_backlog = self.ep_backlog_sum / steps
-            peak_backlog = int(self.ep_backlog_peak)
 
             delivered_total = int(self.ep_delivered_total)
             throughput_per_100 = 100.0 * delivered_total / steps
@@ -1188,7 +1212,6 @@ class VineEnv(MultiAgentEnv):
             )
 
             total_initial_boxes = max(1, int(self.initial_total_boxes))
-            delivered_pct = 100.0 * delivered_total / total_initial_boxes
 
             remaining_work_pct = 100.0 * (
                 remaining_unharvested_box_equiv
@@ -1202,35 +1225,68 @@ class VineEnv(MultiAgentEnv):
 
             human_total_steps = max(1, self.num_humans * steps)
             rest_ratio = self.ep_human_rest_steps / human_total_steps
-            human_util = self.ep_human_busy_steps / human_total_steps
 
             drone_total_steps = max(1, self.num_drones * steps)
-            drone_util = self.ep_drone_flying_steps / drone_total_steps
+
+            delivery_denominator = max(1, delivered_total)
+
+            human_deliveries = int(self.ep_human_delivered_total)
+            drone_deliveries = int(self.ep_drone_delivered_total)
+
+            human_delivery_pct = 100.0 * human_deliveries / delivery_denominator
+            drone_delivery_pct = 100.0 * drone_deliveries / delivery_denominator
 
             summary = {
-                "kpi_delivered_total": delivered_total,
-                "kpi_throughput_per_100_steps": throughput_per_100,
-                "kpi_mean_backlog": float(mean_backlog),
-                "kpi_peak_backlog": peak_backlog,
-                "kpi_rest_ratio": float(rest_ratio),
-                "kpi_delivered_pct": float(delivered_pct),
-                "kpi_remaining_work_pct": float(remaining_work_pct),
-                "kpi_completion_pct": float(completion_pct),
-                "kpi_human_utilization": float(human_util),
-                "kpi_drone_utilization": float(drone_util),
-                "episode_fatigue_increase_total": float(self.ep_fatigue_increase_total),
-                "episode_delivered_delta_total": int(self.ep_delivered_delta_total),
-                "kpi_mean_fatigue": float(self.ep_fatigue_sum / steps),
-                "kpi_peak_fatigue": float(self.ep_fatigue_peak),
-                "kpi_fatigue_hi_ratio": float(self.ep_fatigue_hi_steps / max(1, self.num_humans * steps)),
-                "r_delivery_per_step": float(self.ep_r_delivery_sum / steps),
-                "r_fatigue_inc_per_step": float(self.ep_r_fatigue_inc_sum / steps),
-                "r_backlog_per_step": float(self.ep_r_backlog_sum / steps),
-                "r_fatigue_level_per_step": float(self.ep_r_fatigue_level_sum / steps),
-                "r_total_per_step": float(self.ep_reward_sum / steps),
+                # Delivery KPIs
+                "D_tot": int(delivered_total),
+                "D_100": float(throughput_per_100),
+                "Comp_pct": float(completion_pct),
+
+                "D_h": int(human_deliveries),
+                "D_dr": int(drone_deliveries),
+                "D_h_pct": float(human_delivery_pct),
+                "D_dr_pct": float(drone_delivery_pct),
+
+                # Fatigue KPIs
+                "F_mean": float(self.ep_mean_fatigue_sum / steps),
+                "F_peak": float(self.ep_peak_fatigue),
+
+                # Backlog KPIs
+                "B_mean": float(self.ep_backlog_total_sum / steps),
+                "B_peak": int(self.ep_backlog_total_peak),
+
+                # Supporting behavioural KPI
+                "rest_ratio": float(rest_ratio),
             }
 
-        # Synchronous PPO-friendly mode:
+            # Per-human KPIs
+            for i, h in enumerate(self.humans):
+                manual_i = int(self.ep_human_manual_deliveries[i])
+                drone_assisted_i = int(self.ep_human_drone_assisted_deliveries[i])
+
+                summary[f"h_{i}_manual_deliveries"] = manual_i
+                summary[f"h_{i}_drone_assisted_deliveries"] = drone_assisted_i
+                summary[f"h_{i}_total_contributed_deliveries"] = manual_i + drone_assisted_i
+
+                summary[f"h_{i}_mean_fatigue"] = float(self.ep_human_fatigue_sum[i] / steps)
+                summary[f"h_{i}_final_fatigue"] = float(h.fatigue)
+                summary[f"h_{i}_peak_fatigue"] = float(self.ep_human_peak_fatigue[i])
+
+                summary[f"h_{i}_decisions_harvest"] = int(self.ep_human_action_steps[i, ACTION_HARVEST])
+                summary[f"h_{i}_decisions_transport"] = int(self.ep_human_action_steps[i, ACTION_TRANSPORT])
+                summary[f"h_{i}_decisions_enqueue"] = int(self.ep_human_action_steps[i, ACTION_ENQUEUE])
+                summary[f"h_{i}_decisions_rest"] = int(self.ep_human_action_steps[i, ACTION_REST])
+
+            # Per-drone KPIs
+            for j, d in enumerate(self.drones):
+                summary[f"dr_{j}_deliveries"] = int(d.delivered_count)
+
+            # Per-handover-point backlog KPIs
+            for p, hp in enumerate(self.handover_points):
+                summary[f"hp_{p}_mean_backlog"] = float(self.ep_handover_backlog_sum[p] / steps)
+                summary[f"hp_{p}_peak_backlog"] = int(self.ep_handover_backlog_peak[p])
+
+        # Synchronous PPO:
         # always return all human agents every env step
         self.agents = self.possible_agents.copy()
 
@@ -1509,7 +1565,6 @@ class VineEnv(MultiAgentEnv):
                 mask[ACTION_REST] = 1.0
             else:
                 mask[ACTION_REST] = 0.0
-                
         obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
         obs = np.clip(obs, 0.0, 1.0).astype(np.float32)
         mask = mask.astype(np.float32)

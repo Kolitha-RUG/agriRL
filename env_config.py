@@ -18,12 +18,12 @@ BASE_ENV_CONFIG = {
     "dt": 1.0,
     "harvest_rate_kg_s": 0.24,
     "harvest_time": 5.0,
-    "enqueue_time": 0.0,
+    "enqueue_time": 1.0,
     "rest_time": 5.0,
-    "rest_fatigue_threshold": 0.4,
+    "rest_fatigue_threshold": 0.5,
     
     "human_speed": 30.0,
-    "drone_speed": 300.0,
+    "drone_speed": 100.0,
 
     "human_harvest_fatigue_rate": 0.0035,
     "human_transport_fatigue_rate": 0.01,
@@ -33,16 +33,16 @@ BASE_ENV_CONFIG = {
     "drone_endurance_unloaded_s": 29.0,
     "drone_charge_time_full_s": 36.6,
 
-    "drone_handover_service_time": 1.0,
-    "drone_dropoff_service_time": 1.0,
+    "drone_handover_service_time": 2.0,
+    "drone_dropoff_service_time": 2.0,
 
-    "max_steps": 240,
+    "max_steps": 500,
     "max_backlog": 10,
 
     "reward_backlog_penalty": 1,
     "reward_fatigue_inc_penalty": 1.5,
     "reward_delivery": 1,
-    "reward_fatigue_level_penalty": 2,
+    "reward_fatigue_level_penalty": 1,
 }
 
 def get_env_config(**overrides):

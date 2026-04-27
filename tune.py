@@ -135,7 +135,7 @@ if __name__ == "__main__":
         run_config=RunConfig(
             name="vineyard_ppo",
             storage_path=os.path.join(PROJECT_DIR, "ray_results_vine"),
-            stop={"training_iteration": 100},
+            stop={"training_iteration": 50},
         ),
     )
 
